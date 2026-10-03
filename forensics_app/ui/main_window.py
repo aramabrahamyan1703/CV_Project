@@ -90,6 +90,7 @@ class MainWindow:
         ttk.Label(sidebar, text="Forensics tools", style="Title.TLabel", background="#eef1f5").pack(
             anchor="w", pady=(0, 12)
         )
+        self.tool_buttons: dict[str, ttk.Button] = {}
         for category, tools in self.registry.categories():
             ttk.Label(sidebar, text=category, style="Category.TLabel").pack(anchor="w", pady=(9, 4))
             for tool in tools:
@@ -99,8 +100,10 @@ class MainWindow:
                     style="Tool.TButton",
                     command=lambda selected=tool: self.run_tool(selected),
                 )
+                self.tool_buttons[tool.tool_id] = button
                 button.pack(fill="x", pady=2)
-                button.bind("<Enter>", lambda _event, selected=tool: self.status.set(selected.description))
+                button.bind("<ButtonRelease-1>", lambda _event, selected=tool: self._on_tool_click(selected))
+                button.bind("<Enter>", lambda _event, selected=tool: self._describe_tool(selected))
                 button.bind("<Leave>", lambda _event: self.status.set("Ready."))
 
         self.image_view = ImageView(body)
@@ -158,8 +161,28 @@ class MainWindow:
             return
         self.status.set(f"Saved result as {Path(filename).name}")
 
+    def _on_tool_click(self, tool: ForensicsTool) -> None:
+        """Explain a greyed-out button, which never reaches :meth:`run_tool`."""
+        if tool.is_available(self.document):
+            return  # the button's own command runs the tool
+        self._report_unavailable(tool)
+
+    def _describe_tool(self, tool: ForensicsTool) -> None:
+        if tool.is_available(self.document):
+            self.status.set(tool.description)
+        else:
+            self.status.set(tool.unavailable_message(self.document).partition("\n")[0])
+
+    def _report_unavailable(self, tool: ForensicsTool) -> None:
+        message = tool.unavailable_message(self.document)
+        messagebox.showinfo(tool.title, message, parent=self.root)
+        self.status.set(message.partition("\n")[0])
+
     def run_tool(self, tool: ForensicsTool) -> None:
         if tool.requires_image and not self._require_image():
+            return
+        if not tool.is_available(self.document):
+            self._report_unavailable(tool)
             return
         try:
             result = tool.run(self.root, self.document)
@@ -171,7 +194,7 @@ class MainWindow:
             self.status.set(f"Cancelled {tool.title}.")
             return
         if result.image is not None:
-            self.document.apply(result.image)
+            self.document.apply(result.image, tool.tool_id)
         self._show_details(result.details)
         self.status.set(result.message)
         self._refresh()
@@ -204,6 +227,10 @@ class MainWindow:
         self.image_view.show(self.document.current)
         self.undo_button.configure(state="normal" if self.document.can_undo else "disabled")
         self.redo_button.configure(state="normal" if self.document.can_redo else "disabled")
+        for tool in self.registry.all():
+            button = self.tool_buttons.get(tool.tool_id)
+            if button is not None:
+                button.configure(state="normal" if tool.is_available(self.document) else "disabled")
         title = self.document.path.name if self.document.path else "No image"
         self.root.title(f"ForensicsApp — {title}")
 

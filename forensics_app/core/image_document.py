@@ -13,14 +13,20 @@ class ImageDocument:
     Tools receive this object, but should not mutate ``current`` directly. They
     return a new PIL image and the main window calls :meth:`apply`, preserving
     undo/redo history automatically.
+
+    Alongside each image the history remembers which tool produced it, so a
+    tool can ask whether it has already been applied (see
+    :meth:`~forensics_app.tools.base.ForensicsTool.is_available`). The answer
+    follows undo, redo, and reset the same way the image does.
     """
 
     def __init__(self) -> None:
         self.path: Path | None = None
         self.original: Image.Image | None = None
         self.current: Image.Image | None = None
-        self._undo: list[Image.Image] = []
-        self._redo: list[Image.Image] = []
+        self.last_tool_id: str | None = None
+        self._undo: list[tuple[Image.Image, str | None]] = []
+        self._redo: list[tuple[Image.Image, str | None]] = []
 
     @property
     def is_loaded(self) -> bool:
@@ -46,35 +52,39 @@ class ImageDocument:
         self.path = source
         self.original = loaded.copy()
         self.current = loaded
+        self.last_tool_id = None
         self._undo.clear()
         self._redo.clear()
 
-    def apply(self, image: Image.Image) -> None:
+    def apply(self, image: Image.Image, tool_id: str | None = None) -> None:
+        """Make ``image`` the working image, recording the tool that made it."""
         if self.current is None:
             raise RuntimeError("Load an image before applying a result.")
-        self._undo.append(self.current.copy())
+        self._undo.append((self.current.copy(), self.last_tool_id))
         self.current = image.copy()
+        self.last_tool_id = tool_id
         self._redo.clear()
 
     def undo(self) -> bool:
         if self.current is None or not self._undo:
             return False
-        self._redo.append(self.current.copy())
-        self.current = self._undo.pop()
+        self._redo.append((self.current.copy(), self.last_tool_id))
+        self.current, self.last_tool_id = self._undo.pop()
         return True
 
     def redo(self) -> bool:
         if self.current is None or not self._redo:
             return False
-        self._undo.append(self.current.copy())
-        self.current = self._redo.pop()
+        self._undo.append((self.current.copy(), self.last_tool_id))
+        self.current, self.last_tool_id = self._redo.pop()
         return True
 
     def reset(self) -> bool:
         if self.original is None or self.current is None:
             return False
-        self._undo.append(self.current.copy())
+        self._undo.append((self.current.copy(), self.last_tool_id))
         self.current = self.original.copy()
+        self.last_tool_id = None
         self._redo.clear()
         return True
 
