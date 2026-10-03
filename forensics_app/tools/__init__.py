@@ -4,6 +4,7 @@ from .grayscale import GrayscaleTool
 from .image_info import ImageInfoTool
 from .registry import ToolRegistry
 from .channel_split import ChannelSplitTool
+from .channel_swap import ChannelSwapTool
 
 
 def build_tool_registry() -> ToolRegistry:
@@ -12,6 +13,7 @@ def build_tool_registry() -> ToolRegistry:
             ImageInfoTool(),
             GrayscaleTool(),
             ChannelSplitTool(),
+            ChannelSwapTool(),
         ]
     )
 
