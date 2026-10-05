@@ -1,69 +1,38 @@
-# ---- Python ----
+# Virtual environments (CRITICAL: never commit .venv)
+.venv/
+env/
+venv/
+ENV/
+
+# Python bytecode and cache
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 
-# Distribution / packaging
-build/
-dist/
-sdist/
-wheels/
-*.egg-info/
-*.egg
-.eggs/
-MANIFEST
-
-# ---- Virtual environments ----
-.venv/
-venv/
-env/
-ENV/
-.python-version
-
-# ---- Testing / coverage / type checking ----
-.pytest_cache/
-.coverage
-.coverage.*
-coverage.xml
-htmlcov/
-.tox/
-.nox/
-.mypy_cache/
-.dmypy.json
-.ruff_cache/
-.hypothesis/
-
-# ---- Jupyter ----
-.ipynb_checkpoints/
-
-# ---- Editors / IDEs ----
-.vscode/
+# IDE / Editor configuration
 .idea/
-*.sublime-workspace
+.vscode/
 *.swp
 *.swo
-*~
 
-# ---- OS cruft ----
+# OS files
 .DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
 Thumbs.db
-ehthumbs.db
-Desktop.ini
 
-# ---- Local environment / secrets ----
-.env
-.env.local
-*.local
+# Jupyter Notebook checkpoints (if used)
+.ipynb_checkpoints/
 
-# ---- Project output ----
-# Images, reports and other artifacts produced by running the forensics tools.
-output/
-outputs/
-results/
-exports/
-*.log
+# Profiling / testing / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Ignore everything inside of data
+data/**/*
+
+# Allow git to search subfolders for exceptions
+!data/**/
+
+# Minus .gitkeep (to keep the folder structure in git)
+!data/**/.gitkeep
