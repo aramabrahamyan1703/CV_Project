@@ -36,3 +36,8 @@ data/**/*
 
 # Minus .gitkeep (to keep the folder structure in git)
 !data/**/.gitkeep
+
+# Ignores my virtual env 
+cv_project/lib/
+cv_project/bin/
+cv_project/include/

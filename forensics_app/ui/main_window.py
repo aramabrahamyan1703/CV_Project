@@ -109,15 +109,15 @@ class MainWindow:
         self.image_view = ImageView(body)
         body.add(self.image_view, weight=1)
 
-        inspector = ttk.Frame(body, padding=12, width=250)
+        inspector = ttk.Frame(body, padding=12, width=320)
         inspector.pack_propagate(False)
         body.add(inspector, weight=0)
         ttk.Label(inspector, text="Results", style="Title.TLabel").pack(anchor="w", pady=(0, 10))
         self.results = ttk.Treeview(inspector, columns=("value",), show="tree headings", height=15)
         self.results.heading("#0", text="Property")
         self.results.heading("value", text="Value")
-        self.results.column("#0", width=95, stretch=True)
-        self.results.column("value", width=120, stretch=True)
+        self.results.column("#0", width=140, minwidth=110, stretch=True)
+        self.results.column("value", width=150, minwidth=120, stretch=True)
         self.results.pack(fill="both", expand=True)
 
         ttk.Label(container, textvariable=self.status, anchor="w", padding=(10, 6), relief="sunken").pack(fill="x")

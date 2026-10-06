@@ -2,13 +2,17 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
+import numpy as np
 from PIL import Image
 
 from forensics_app.core import ImageDocument
 from forensics_app.tools.base import ForensicsTool
 from forensics_app.tools.channel_split import ChannelSplitTool
 from forensics_app.tools.channel_swap import ChannelSwapTool, parse_order, swap_channels
+from forensics_app.tools.contrast_stretch import ContrastStretchTool, stretch_contrast
 from forensics_app.tools.grayscale import GrayscaleTool
+from forensics_app.tools.histogram import HistogramTool, compute_histogram
+from forensics_app.tools.masking import MaskingTool, apply_threshold_mask
 from forensics_app.tools.registry import ToolRegistry
 
 
@@ -316,6 +320,135 @@ class ChannelSwapTests(unittest.TestCase):
 
     def test_stays_available_with_no_image_so_the_window_can_prompt(self) -> None:
         self.assertTrue(self.tool.is_available(ImageDocument()))
+
+
+class MaskingTests(unittest.TestCase):
+    def test_keeps_bright_pixels_and_zeros_the_rest(self) -> None:
+        source = Image.new("L", (4, 1), 0)
+        source.putpixel((0, 0), 50)
+        source.putpixel((1, 0), 135)
+        source.putpixel((2, 0), 136)
+        source.putpixel((3, 0), 200)
+        output = apply_threshold_mask(source, 135, keep_above=True)
+        self.assertEqual([output.getpixel((x, 0)) for x in range(4)], [0, 0, 136, 200])
+
+    def test_inverse_keeps_dark_pixels_only(self) -> None:
+        # Matches slide "masked image 2": under the threshold.
+        source = Image.new("L", (4, 1), 0)
+        source.putpixel((0, 0), 50)
+        source.putpixel((1, 0), 135)
+        source.putpixel((2, 0), 136)
+        source.putpixel((3, 0), 200)
+        output = apply_threshold_mask(source, 135, keep_above=False)
+        self.assertEqual([output.getpixel((x, 0)) for x in range(4)], [50, 0, 0, 0])
+
+    def test_masks_rgb_from_luminance_without_mutating_input(self) -> None:
+        source = Image.new("RGB", (2, 1), (10, 10, 10))
+        source.putpixel((1, 0), (200, 200, 200))
+        output = apply_threshold_mask(source, 100)
+        self.assertEqual(output.getpixel((0, 0)), (0, 0, 0))
+        self.assertEqual(output.getpixel((1, 0)), (200, 200, 200))
+        self.assertEqual(source.getpixel((0, 0)), (10, 10, 10))
+
+    def test_rejects_when_no_pixels_under_the_threshold(self) -> None:
+        # Every pixel is 200, so nothing is under 50.
+        with self.assertRaises(ValueError) as caught:
+            apply_threshold_mask(Image.new("L", (4, 4), 200), 50, keep_above=False)
+        self.assertIn("No pixels under the threshold", str(caught.exception))
+
+    def test_rejects_when_no_pixels_above_the_threshold(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            apply_threshold_mask(Image.new("L", (4, 4), 10), 50, keep_above=True)
+        self.assertIn("No pixels above the threshold", str(caught.exception))
+
+    def test_rejects_an_out_of_range_threshold(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            apply_threshold_mask(Image.new("L", (2, 2), 128), 300)
+        self.assertIn("0 and 255", str(caught.exception))
+
+    def test_tool_cancelling_returns_none(self) -> None:
+        document = ImageDocument()
+        document.current = Image.new("L", (8, 8), 180)
+        tool = MaskingTool()
+        tool._ask_mask_options = lambda _parent: None
+        self.assertIsNone(tool.run(None, document))
+
+    def test_tool_logs_under_threshold_choice(self) -> None:
+        document = ImageDocument()
+        document.current = Image.new("L", (8, 8), 40)
+        document.current.putpixel((0, 0), 200)
+        tool = MaskingTool()
+        tool._ask_mask_options = lambda _parent: (100, False)
+        result = tool.run(None, document)
+        self.assertEqual(result.details["Keep"], "under threshold")
+        self.assertEqual(result.details["Threshold"], 100)
+        self.assertEqual(result.image.getpixel((0, 0)), 0)
+        self.assertEqual(result.image.getpixel((1, 1)), 40)
+
+
+class HistogramTests(unittest.TestCase):
+    def test_counts_every_intensity_bin(self) -> None:
+        channel = np.array([[0, 0, 255], [128, 128, 128]], dtype=np.uint8)
+        counts = compute_histogram(channel)
+        self.assertEqual(counts.shape, (256,))
+        self.assertEqual(int(counts[0]), 2)
+        self.assertEqual(int(counts[128]), 3)
+        self.assertEqual(int(counts[255]), 1)
+
+    def test_rejects_an_empty_channel(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            compute_histogram(np.zeros((0, 0), dtype=np.uint8))
+        self.assertIn("empty", str(caught.exception))
+
+    def test_tool_returns_a_plot_image_and_leaves_the_document_alone(self) -> None:
+        document = ImageDocument()
+        document.current = Image.new("RGB", (20, 15), (10, 120, 250))
+        result = HistogramTool().run(None, document)
+        self.assertEqual(result.image.mode, "RGB")
+        self.assertGreater(result.image.width, 100)
+        self.assertEqual(document.current.getpixel((0, 0)), (10, 120, 250))
+        self.assertEqual(result.details["Blue peak bin"], 250)
+
+    def test_unavailable_once_its_own_plot_is_the_working_image(self) -> None:
+        tool = HistogramTool()
+        document = ImageDocument()
+        document.current = Image.new("L", (20, 15), 90)
+        self.assertTrue(tool.is_available(document))
+        document.apply(tool.run(None, document).image, tool.tool_id)
+        self.assertFalse(tool.is_available(document))
+
+
+class ContrastStretchTests(unittest.TestCase):
+    def test_spreads_a_narrow_range_to_nearly_full_scale(self) -> None:
+        # Low-contrast strip: values only between 80 and 120.
+        source = Image.new("L", (5, 1), 100)
+        for x, value in enumerate((80, 90, 100, 110, 120)):
+            source.putpixel((x, 0), value)
+        output = stretch_contrast(source, low_percent=0, high_percent=100)
+        values = [output.getpixel((x, 0)) for x in range(5)]
+        self.assertEqual(values[0], 0)
+        self.assertEqual(values[-1], 255)
+        self.assertTrue(values[0] < values[2] < values[-1])
+
+    def test_rejects_collapsed_percentiles_on_a_flat_image(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            stretch_contrast(Image.new("L", (8, 8), 90), 2, 98)
+        self.assertIn("same value", str(caught.exception))
+
+    def test_rejects_inverted_percentile_bounds(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            stretch_contrast(Image.new("L", (4, 4), 40), 90, 10)
+        self.assertIn("low < high", str(caught.exception))
+
+    def test_tool_cancelling_returns_none(self) -> None:
+        document = ImageDocument()
+        document.current = Image.new("L", (8, 8), 100)
+        document.current.putpixel((0, 0), 40)
+        document.current.putpixel((7, 7), 200)
+        tool = ContrastStretchTool()
+        tool._ask_percentiles = lambda _parent: None
+        self.assertIsNone(tool.run(None, document))
+
 
 if __name__ == "__main__":
     unittest.main()
