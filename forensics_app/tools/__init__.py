@@ -5,6 +5,9 @@ from .image_info import ImageInfoTool
 from .registry import ToolRegistry
 from .channel_split import ChannelSplitTool
 from .channel_swap import ChannelSwapTool
+from .masking import MaskingTool
+from .contrast_stretch import ContrastStretchTool
+from .histogram import HistogramTool
 
 
 def build_tool_registry() -> ToolRegistry:
@@ -14,6 +17,9 @@ def build_tool_registry() -> ToolRegistry:
             GrayscaleTool(),
             ChannelSplitTool(),
             ChannelSwapTool(),
+            MaskingTool(),
+            HistogramTool(),
+            ContrastStretchTool(),
         ]
     )
 
