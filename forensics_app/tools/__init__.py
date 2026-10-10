@@ -8,6 +8,14 @@ from .channel_swap import ChannelSwapTool
 from .masking import MaskingTool
 from .contrast_stretch import ContrastStretchTool
 from .histogram import HistogramTool
+from .convolution import ConvolutionTool
+from .skimage_filters import (
+    GaussianFilterTool,
+    MedianFilterTool,
+    SobelFilterTool,
+    UnsharpMaskTool,
+)
+from .canny import CannyEdgeTool
 
 
 def build_tool_registry() -> ToolRegistry:
@@ -20,6 +28,12 @@ def build_tool_registry() -> ToolRegistry:
             MaskingTool(),
             HistogramTool(),
             ContrastStretchTool(),
+            ConvolutionTool(),
+            GaussianFilterTool(),
+            MedianFilterTool(),
+            SobelFilterTool(),
+            UnsharpMaskTool(),
+            CannyEdgeTool(),
         ]
     )
 

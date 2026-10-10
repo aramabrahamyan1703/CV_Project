@@ -8,12 +8,28 @@ from PIL import Image
 from forensics_app.core import ImageDocument
 from forensics_app.tools.base import ForensicsTool
 from forensics_app.tools.channel_split import ChannelSplitTool
+from forensics_app.tools.canny import CannyEdgeTool, canny_edges
 from forensics_app.tools.channel_swap import ChannelSwapTool, parse_order, swap_channels
+from forensics_app.tools.convolution import (
+    ConvolutionTool,
+    convolve_image,
+    parse_kernel,
+)
 from forensics_app.tools.contrast_stretch import ContrastStretchTool, stretch_contrast
 from forensics_app.tools.grayscale import GrayscaleTool
 from forensics_app.tools.histogram import HistogramTool, compute_histogram
 from forensics_app.tools.masking import MaskingTool, apply_threshold_mask
 from forensics_app.tools.registry import ToolRegistry
+from forensics_app.tools.skimage_filters import (
+    GaussianFilterTool,
+    MedianFilterTool,
+    SobelFilterTool,
+    UnsharpMaskTool,
+    gaussian_blur,
+    median_filter,
+    sobel_edges,
+    unsharp_mask,
+)
 
 
 class ToolTests(unittest.TestCase):
@@ -448,6 +464,360 @@ class ContrastStretchTests(unittest.TestCase):
         tool = ContrastStretchTool()
         tool._ask_percentiles = lambda _parent: None
         self.assertIsNone(tool.run(None, document))
+
+
+class ParseKernelTests(unittest.TestCase):
+    def test_reads_rows_of_fractions_and_decimals(self) -> None:
+        kernel = parse_kernel("1/16 2/16 1/16\n0.125 0.25 0.125\n1/16 1/8 1/16")
+        self.assertEqual(kernel.shape, (3, 3))
+        self.assertAlmostEqual(float(kernel.sum()), 1.0)
+
+    def test_accepts_commas_semicolons_and_blank_lines(self) -> None:
+        kernel = parse_kernel("\n 0, -1, 0 ; -1, 5, -1\n\n0,-1,0 \n")
+        np.testing.assert_array_equal(kernel, [[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
+
+    def test_accepts_a_rectangular_kernel(self) -> None:
+        self.assertEqual(parse_kernel("1 2 3 2 1").shape, (1, 5))
+
+    def test_rejects_ragged_rows(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            parse_kernel("1 2 1\n2 4\n1 2 1")
+        self.assertIn("same number of entries", str(caught.exception))
+
+    def test_rejects_an_even_side(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            parse_kernel("1 1\n1 1")
+        self.assertIn("odd", str(caught.exception))
+
+    def test_rejects_non_numbers_and_division_by_zero(self) -> None:
+        for text in ("1 x 1", "1 1/0 1"):
+            with self.assertRaises(ValueError) as caught:
+                parse_kernel(text)
+            self.assertIn("not a number", str(caught.exception))
+
+    def test_rejects_an_empty_kernel(self) -> None:
+        with self.assertRaises(ValueError):
+            parse_kernel("  \n ; ")
+
+    def test_rejects_an_oversized_kernel(self) -> None:
+        row = " ".join(["1"] * 27)
+        with self.assertRaises(ValueError) as caught:
+            parse_kernel("\n".join([row] * 27))
+        self.assertIn("largest side", str(caught.exception))
+
+
+class ConvolveImageTests(unittest.TestCase):
+    def test_flips_the_kernel_like_true_convolution(self) -> None:
+        # An impulse convolved with k reproduces k unflipped around it;
+        # correlation would give the kernel rotated by 180 degrees.
+        source = Image.new("L", (5, 5), 0)
+        source.putpixel((2, 2), 1)
+        kernel = np.array([[1, 2, 3], [4, 5, 6], [7, 8, 9]], dtype=np.float64) * 20
+        output = convolve_image(source, kernel, normalize=False, border="constant")
+        patch = np.asarray(output)[1:4, 1:4]
+        np.testing.assert_array_equal(patch, kernel.astype(np.uint8))
+
+    def test_identity_kernel_changes_nothing_and_leaves_input_alone(self) -> None:
+        source = Image.new("RGB", (6, 4), (10, 120, 250))
+        source.putpixel((3, 2), (200, 0, 30))
+        before = np.asarray(source).copy()
+        output = convolve_image(source, parse_kernel("0 0 0\n0 1 0\n0 0 0"))
+        np.testing.assert_array_equal(np.asarray(output), before)
+        np.testing.assert_array_equal(np.asarray(source), before)
+
+    def test_box_blur_keeps_a_flat_image_flat_up_to_the_border(self) -> None:
+        # Zero padding would darken the edges; reflect must not.
+        source = Image.new("L", (7, 5), 100)
+        output = convolve_image(source, parse_kernel("1 1 1\n1 1 1\n1 1 1"))
+        self.assertTrue((np.asarray(output) == 100).all())
+
+    def test_zero_padding_darkens_the_corner(self) -> None:
+        source = Image.new("L", (7, 5), 90)
+        output = convolve_image(source, np.ones((3, 3)), border="constant")
+        self.assertEqual(output.getpixel((0, 0)), 40)  # 4 of 9 neighbours inside
+
+    def test_normalize_skips_a_zero_sum_kernel(self) -> None:
+        output = convolve_image(Image.new("L", (5, 5), 80), parse_kernel("0 1 0\n1 -4 1\n0 1 0"))
+        self.assertTrue((np.asarray(output) == 0).all())
+
+    def test_abs_shows_both_sides_of_a_step_edge(self) -> None:
+        source = Image.new("L", (6, 1), 0)
+        for x in range(3, 6):
+            source.putpixel((x, 0), 200)
+        kernel = parse_kernel("-1 0 1")
+        clipped = np.asarray(convolve_image(source, kernel, border="edge", negatives="clip"))[0]
+        absolute = np.asarray(convolve_image(source, kernel, border="edge", negatives="abs"))[0]
+        # Convolution flips [-1 0 1], so the rising edge gives -200 here.
+        self.assertEqual(list(clipped), [0, 0, 0, 0, 0, 0])
+        self.assertEqual(list(absolute), [0, 0, 200, 200, 0, 0])
+
+    def test_keeps_alpha_and_rgba_mode(self) -> None:
+        source = Image.new("RGBA", (4, 4), (50, 100, 150, 77))
+        output = convolve_image(source, parse_kernel("1 2 1\n2 4 2\n1 2 1"))
+        self.assertEqual(output.mode, "RGBA")
+        self.assertEqual(output.getpixel((1, 1)), (50, 100, 150, 77))
+
+    def test_handles_a_one_pixel_tall_image(self) -> None:
+        source = Image.new("L", (5, 1), 60)
+        output = convolve_image(source, np.ones((3, 3)))
+        self.assertEqual(output.size, (5, 1))
+        self.assertTrue((np.asarray(output) == 60).all())
+
+    def test_rejects_an_unsupported_mode(self) -> None:
+        with self.assertRaises(ValueError):
+            convolve_image(Image.new("CMYK", (4, 4)), np.ones((3, 3)))
+
+
+class ConvolutionToolTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tool = ConvolutionTool()
+        self.document = ImageDocument()
+        self.document.current = Image.new("L", (8, 8), 100)
+
+    def test_cancelling_the_dialog_returns_none(self) -> None:
+        self.tool._ask_kernel_options = lambda _parent: None
+        self.assertIsNone(self.tool.run(None, self.document))
+
+    def test_records_the_kernel_and_options_in_details(self) -> None:
+        kernel = parse_kernel("1 2 1\n2 4 2\n1 2 1")
+        self.tool._ask_kernel_options = lambda _parent: (kernel, True, "reflect", "clip")
+        result = self.tool.run(None, self.document)
+        self.assertEqual(result.details["Kernel size"], "3×3")
+        self.assertIn("1 / 16", result.details["Normalization"])
+        self.assertEqual(result.details["Border"], "Reflect")
+        self.assertEqual(result.image.getpixel((4, 4)), 100)
+        self.assertEqual(self.document.current.getpixel((4, 4)), 100)
+
+    def test_stays_available_on_its_own_output(self) -> None:
+        self.tool._ask_kernel_options = lambda _parent: (np.ones((3, 3)), True, "reflect", "clip")
+        self.document.apply(self.tool.run(None, self.document).image, self.tool.tool_id)
+        self.assertTrue(self.tool.is_available(self.document))
+
+    def test_unavailable_for_an_unsupported_mode(self) -> None:
+        self.document.current = Image.new("CMYK", (4, 4))
+        self.assertFalse(self.tool.is_available(self.document))
+        self.assertIn("CMYK", self.tool.unavailable_message(self.document))
+
+
+class GaussianFilterTests(unittest.TestCase):
+    def test_spreads_a_bright_dot_and_keeps_its_peak_in_place(self) -> None:
+        source = Image.new("L", (9, 9), 0)
+        source.putpixel((4, 4), 255)
+        output = np.asarray(gaussian_blur(source, 1.0))
+        self.assertLess(int(output[4, 4]), 255)
+        self.assertGreater(int(output[4, 5]), 0)
+        self.assertEqual(np.unravel_index(output.argmax(), output.shape), (4, 4))
+
+    def test_larger_sigma_blurs_more(self) -> None:
+        source = Image.new("L", (15, 15), 0)
+        source.putpixel((7, 7), 255)
+        mild = np.asarray(gaussian_blur(source, 1.0))
+        strong = np.asarray(gaussian_blur(source, 3.0))
+        self.assertGreater(int(mild[7, 7]), int(strong[7, 7]))
+
+    def test_keeps_a_flat_colour_image_and_its_alpha(self) -> None:
+        source = Image.new("RGBA", (6, 6), (40, 120, 220, 90))
+        output = gaussian_blur(source, 2.0)
+        self.assertEqual(output.mode, "RGBA")
+        self.assertEqual(output.getpixel((0, 0)), (40, 120, 220, 90))
+
+    def test_rejects_a_non_positive_sigma(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            gaussian_blur(Image.new("L", (4, 4), 50), 0)
+        self.assertIn("Sigma", str(caught.exception))
+
+    def test_tool_records_sigma_and_cancel_returns_none(self) -> None:
+        document = ImageDocument()
+        document.current = Image.new("L", (8, 8), 100)
+        tool = GaussianFilterTool()
+        tool._ask_sigma = lambda _parent: None
+        self.assertIsNone(tool.run(None, document))
+        tool._ask_sigma = lambda _parent: 1.5
+        result = tool.run(None, document)
+        self.assertEqual(result.details["Sigma"], 1.5)
+        self.assertEqual(result.details["Function"], "skimage.filters.gaussian")
+
+
+class MedianFilterTests(unittest.TestCase):
+    def test_removes_an_isolated_noise_pixel(self) -> None:
+        source = Image.new("L", (7, 7), 80)
+        source.putpixel((3, 3), 255)  # "salt"
+        output = median_filter(source, 3)
+        self.assertTrue((np.asarray(output) == 80).all())
+
+    def test_keeps_a_straight_edge_sharp(self) -> None:
+        source = Image.new("L", (8, 8), 0)
+        for x in range(4, 8):
+            for y in range(8):
+                source.putpixel((x, y), 200)
+        np.testing.assert_array_equal(np.asarray(median_filter(source, 3)), np.asarray(source))
+
+    def test_filters_each_colour_channel_and_keeps_alpha(self) -> None:
+        source = Image.new("RGBA", (5, 5), (10, 20, 30, 128))
+        source.putpixel((2, 2), (255, 0, 255, 128))
+        self.assertEqual(median_filter(source, 3).getpixel((2, 2)), (10, 20, 30, 128))
+
+    def test_rejects_an_even_window(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            median_filter(Image.new("L", (4, 4), 50), 4)
+        self.assertIn("odd", str(caught.exception))
+
+    def test_tool_cancelling_returns_none(self) -> None:
+        document = ImageDocument()
+        document.current = Image.new("L", (8, 8), 100)
+        tool = MedianFilterTool()
+        tool._ask_size = lambda _parent: None
+        self.assertIsNone(tool.run(None, document))
+
+
+class SobelFilterTests(unittest.TestCase):
+    def test_marks_a_vertical_edge_and_nothing_else(self) -> None:
+        source = Image.new("L", (8, 8), 0)
+        for x in range(4, 8):
+            for y in range(8):
+                source.putpixel((x, y), 200)
+        output, peak = sobel_edges(source)
+        row = np.asarray(output)[4]
+        self.assertGreater(peak, 0)
+        self.assertEqual(int(row.max()), 255)
+        self.assertEqual(int(row[0]), 0)
+        self.assertEqual(int(row[7]), 0)
+        self.assertGreater(int(row[3]), 0)
+
+    def test_flat_image_gives_a_black_map(self) -> None:
+        output, peak = sobel_edges(Image.new("RGB", (6, 6), (90, 90, 90)))
+        self.assertEqual(peak, 0.0)
+        self.assertTrue((np.asarray(output) == 0).all())
+
+    def test_tool_returns_a_grayscale_map_without_mutating_the_document(self) -> None:
+        document = ImageDocument()
+        document.current = Image.new("RGB", (8, 8), (10, 20, 30))
+        document.current.putpixel((4, 4), (250, 250, 250))
+        result = SobelFilterTool().run(None, document)
+        self.assertEqual(result.image.mode, "L")
+        self.assertEqual(document.current.mode, "RGB")
+        self.assertEqual(document.current.getpixel((4, 4)), (250, 250, 250))
+
+    def test_unavailable_for_an_unsupported_mode(self) -> None:
+        document = ImageDocument()
+        document.current = Image.new("CMYK", (4, 4))
+        self.assertFalse(SobelFilterTool().is_available(document))
+
+
+class UnsharpMaskTests(unittest.TestCase):
+    @staticmethod
+    def _step_image() -> Image.Image:
+        source = Image.new("L", (12, 4), 60)
+        source.paste(190, (6, 0, 12, 4))
+        return source
+
+    def test_overshoots_both_sides_of_an_edge(self) -> None:
+        row = np.asarray(unsharp_mask(self._step_image(), 1.0, 1.0))[2]
+        self.assertLess(int(row[5]), 60)  # dark side gets darker
+        self.assertGreater(int(row[6]), 190)  # bright side gets brighter
+        self.assertEqual(int(row[0]), 60)  # far from the edge: unchanged
+        self.assertEqual(int(row[11]), 190)
+
+    def test_larger_amount_sharpens_more(self) -> None:
+        mild = np.asarray(unsharp_mask(self._step_image(), 1.0, 0.5))[2]
+        strong = np.asarray(unsharp_mask(self._step_image(), 1.0, 2.0))[2]
+        self.assertLess(int(strong[5]), int(mild[5]))
+        self.assertGreater(int(strong[6]), int(mild[6]))
+
+    def test_zero_amount_changes_nothing(self) -> None:
+        source = self._step_image()
+        np.testing.assert_array_equal(
+            np.asarray(unsharp_mask(source, 2.0, 0.0)), np.asarray(source)
+        )
+
+    def test_keeps_a_flat_colour_image_and_its_alpha(self) -> None:
+        source = Image.new("RGBA", (6, 6), (40, 120, 220, 90))
+        output = unsharp_mask(source, 2.0, 1.5)
+        self.assertEqual(output.mode, "RGBA")
+        self.assertEqual(output.getpixel((3, 3)), (40, 120, 220, 90))
+
+    def test_sharpens_each_colour_channel_like_a_grayscale_image(self) -> None:
+        # Guards the channel_axis=2 workaround: each RGB band must come out
+        # exactly as if that band were sharpened on its own.
+        rgb = np.random.default_rng(1).integers(0, 256, (10, 14, 3)).astype(np.uint8)
+        output = np.asarray(unsharp_mask(Image.fromarray(rgb, mode="RGB"), 1.5, 1.0))
+        for band in range(3):
+            alone = unsharp_mask(Image.fromarray(rgb[..., band], mode="L"), 1.5, 1.0)
+            np.testing.assert_array_equal(output[..., band], np.asarray(alone))
+
+    def test_rejects_out_of_range_settings(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            unsharp_mask(self._step_image(), 0, 1.0)
+        self.assertIn("Radius", str(caught.exception))
+        with self.assertRaises(ValueError) as caught:
+            unsharp_mask(self._step_image(), 1.0, -1.0)
+        self.assertIn("Amount", str(caught.exception))
+
+    def test_tool_records_settings_and_cancel_returns_none(self) -> None:
+        document = ImageDocument()
+        document.current = self._step_image()
+        tool = UnsharpMaskTool()
+        tool._ask_options = lambda _parent: None
+        self.assertIsNone(tool.run(None, document))
+        tool._ask_options = lambda _parent: (1.5, 2.0)
+        result = tool.run(None, document)
+        self.assertEqual(result.details["Radius (sigma)"], 1.5)
+        self.assertEqual(result.details["Amount"], 2.0)
+        self.assertEqual(document.current.getpixel((5, 2)), 60)
+
+
+class CannyEdgeTests(unittest.TestCase):
+    @staticmethod
+    def _step_image() -> Image.Image:
+        source = Image.new("L", (20, 20), 30)
+        for x in range(10, 20):
+            for y in range(20):
+                source.putpixel((x, y), 220)
+        return source
+
+    def test_finds_a_thin_line_on_a_step_edge(self) -> None:
+        # A mid-grey column gives the step a single centre; a step that falls
+        # between two pixels ties them, and Canny then keeps both.
+        source = self._step_image()
+        source.paste(125, (10, 0, 11, 20))
+        edges = np.asarray(canny_edges(source, 1.0))
+        self.assertEqual(set(np.unique(edges)), {0, 255})
+        # One thin line right at the step, nothing in the flat halves.
+        self.assertEqual(list(np.nonzero(edges[10])[0]), [10])
+
+    def test_flat_image_has_no_edges(self) -> None:
+        edges = canny_edges(Image.new("RGB", (16, 16), (200, 200, 200)), 1.0)
+        self.assertFalse(np.asarray(edges).any())
+
+    def test_larger_sigma_suppresses_noise_edges(self) -> None:
+        noise = np.random.default_rng(0).integers(0, 256, (40, 40)).astype(np.uint8)
+        source = Image.fromarray(noise, mode="L")
+        fine = np.count_nonzero(np.asarray(canny_edges(source, 1.0)))
+        smooth = np.count_nonzero(np.asarray(canny_edges(source, 4.0)))
+        self.assertGreater(fine, smooth)
+
+    def test_rejects_a_non_positive_sigma(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            canny_edges(self._step_image(), 0)
+        self.assertIn("Sigma", str(caught.exception))
+
+    def test_tool_records_sigma_and_cancel_returns_none(self) -> None:
+        document = ImageDocument()
+        document.current = self._step_image().convert("RGBA")
+        tool = CannyEdgeTool()
+        tool._ask_sigma = lambda _parent: None
+        self.assertIsNone(tool.run(None, document))
+        tool._ask_sigma = lambda _parent: 2.0
+        result = tool.run(None, document)
+        self.assertEqual(result.image.mode, "L")
+        self.assertEqual(result.details["Sigma"], 2.0)
+        self.assertEqual(result.details["Function"], "skimage.feature.canny")
+        self.assertEqual(document.current.mode, "RGBA")
+
+    def test_unavailable_for_an_unsupported_mode(self) -> None:
+        document = ImageDocument()
+        document.current = Image.new("CMYK", (4, 4))
+        self.assertFalse(CannyEdgeTool().is_available(document))
 
 
 if __name__ == "__main__":
