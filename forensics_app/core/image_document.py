@@ -44,6 +44,22 @@ class ImageDocument:
     def is_modified(self) -> bool:
         return bool(self._undo)
 
+    @property
+    def history(self) -> tuple[str | None, ...]:
+        """Tool ids of every step from the loaded image up to the current one.
+
+        ``None`` marks the original image -- the first step, and any reset.
+        Empty when no image is loaded.
+        """
+        if self.current is None:
+            return ()
+        return tuple(tool_id for _, tool_id in self._undo) + (self.last_tool_id,)
+
+    @property
+    def redo_history(self) -> tuple[str | None, ...]:
+        """Tool ids of the undone steps, in the order redo would bring them back."""
+        return tuple(tool_id for _, tool_id in reversed(self._redo))
+
     def load(self, path: str | Path) -> None:
         """Load an image and detach it from the underlying file handle."""
         source = Path(path)

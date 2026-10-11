@@ -36,6 +36,22 @@ class ImageDocumentTests(unittest.TestCase):
         self.assertTrue(self.document.undo())
         self.assertEqual(self.document.current.getpixel((0, 0)), (0, 0, 255))
 
+    def test_history_follows_apply_undo_redo_and_reset(self) -> None:
+        self.assertEqual(self.document.history, (None,))
+        self.document.apply(Image.new("RGB", (8, 6), "blue"), "blue")
+        self.document.apply(Image.new("RGB", (8, 6), "green"), "green")
+        self.assertEqual(self.document.history, (None, "blue", "green"))
+        self.document.undo()
+        self.assertEqual(self.document.history, (None, "blue"))
+        self.assertEqual(self.document.redo_history, ("green",))
+        self.document.redo()
+        self.document.reset()
+        self.assertEqual(self.document.history, (None, "blue", "green", None))
+        self.assertEqual(self.document.redo_history, ())
+
+    def test_history_is_empty_before_loading(self) -> None:
+        self.assertEqual(ImageDocument().history, ())
+
     def test_save_writes_current_image(self) -> None:
         target = Path(self.temporary_directory.name) / "result.png"
         self.document.save(target)

@@ -146,7 +146,9 @@ ForensicsApp/
 │   │   └── grayscale.py           image-producing example
 │   └── ui/
 │       ├── main_window.py         menus, panels, and coordination
-│       └── image_view.py          scaled image preview
+│       ├── image_view.py          scaled preview, pixel rulers, pixel readout
+│       ├── scrollable.py          scrolling tool sidebar
+│       └── theme.py               colours, fonts, and ttk styles
 ├── tests/                         fast tests that need no display
 └── docs/
     └── STUDENT_GUIDE.md           this handout
