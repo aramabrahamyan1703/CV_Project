@@ -10,6 +10,14 @@ from .image_info import ImageInfoTool
 from .masking import MaskingTool
 from .registry import ToolRegistry
 from .sharpen import SharpenTool
+from .convolution import ConvolutionTool
+from .skimage_filters import (
+    GaussianFilterTool,
+    MedianFilterTool,
+    SobelFilterTool,
+    UnsharpMaskTool,
+)
+from .canny import CannyEdgeTool
 
 
 def build_tool_registry() -> ToolRegistry:
@@ -24,6 +32,12 @@ def build_tool_registry() -> ToolRegistry:
             ContrastStretchTool(),
             EdgeVisualizationTool(),
             SharpenTool(),
+            ConvolutionTool(),
+            GaussianFilterTool(),
+            MedianFilterTool(),
+            SobelFilterTool(),
+            UnsharpMaskTool(),
+            CannyEdgeTool(),
         ]
     )
 
