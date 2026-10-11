@@ -10,10 +10,12 @@ from forensics_app.tools.base import ForensicsTool
 from forensics_app.tools.channel_split import ChannelSplitTool
 from forensics_app.tools.channel_swap import ChannelSwapTool, parse_order, swap_channels
 from forensics_app.tools.contrast_stretch import ContrastStretchTool, stretch_contrast
+from forensics_app.tools.edge_visualization import EdgeVisualizationTool, superimpose_edges
 from forensics_app.tools.grayscale import GrayscaleTool
 from forensics_app.tools.histogram import HistogramTool, compute_histogram
-from forensics_app.tools.masking import MaskingTool, apply_threshold_mask
+from forensics_app.tools.masking import MaskingTool, compose_with_mask
 from forensics_app.tools.registry import ToolRegistry
+from forensics_app.tools.sharpen import SharpenTool, sharpen_image
 
 
 class ToolTests(unittest.TestCase):
@@ -323,67 +325,49 @@ class ChannelSwapTests(unittest.TestCase):
 
 
 class MaskingTests(unittest.TestCase):
-    def test_keeps_bright_pixels_and_zeros_the_rest(self) -> None:
-        source = Image.new("L", (4, 1), 0)
-        source.putpixel((0, 0), 50)
-        source.putpixel((1, 0), 135)
-        source.putpixel((2, 0), 136)
-        source.putpixel((3, 0), 200)
-        output = apply_threshold_mask(source, 135, keep_above=True)
-        self.assertEqual([output.getpixel((x, 0)) for x in range(4)], [0, 0, 136, 200])
+    def test_pastes_overlay_colours_onto_the_base(self) -> None:
+        base = Image.new("RGB", (4, 4), (10, 20, 30))
+        overlay = Image.new("RGB", (4, 4), (0, 0, 0))
+        overlay.putpixel((1, 1), (255, 200, 0))
+        output, details = compose_with_mask(base, overlay)
+        self.assertEqual(output.getpixel((1, 1)), (255, 200, 0))
+        self.assertEqual(output.getpixel((0, 0)), (10, 20, 30))
+        self.assertEqual(base.getpixel((1, 1)), (10, 20, 30))  # base unchanged
+        self.assertEqual(details["Fill"], "overlay colours")
 
-    def test_inverse_keeps_dark_pixels_only(self) -> None:
-        # Matches slide "masked image 2": under the threshold.
-        source = Image.new("L", (4, 1), 0)
-        source.putpixel((0, 0), 50)
-        source.putpixel((1, 0), 135)
-        source.putpixel((2, 0), 136)
-        source.putpixel((3, 0), 200)
-        output = apply_threshold_mask(source, 135, keep_above=False)
-        self.assertEqual([output.getpixel((x, 0)) for x in range(4)], [50, 0, 0, 0])
+    def test_fills_the_mask_with_a_texture(self) -> None:
+        base = Image.new("RGB", (4, 4), (10, 20, 30))
+        overlay = Image.new("RGB", (4, 4), (0, 0, 0))
+        overlay.putpixel((2, 2), (255, 0, 0))
+        texture = Image.new("RGB", (4, 4), (1, 2, 3))
+        texture.putpixel((2, 2), (9, 8, 7))
+        output, details = compose_with_mask(base, overlay, texture)
+        self.assertEqual(output.getpixel((2, 2)), (9, 8, 7))
+        self.assertEqual(output.getpixel((0, 0)), (10, 20, 30))
+        self.assertEqual(details["Fill"], "texture")
 
-    def test_masks_rgb_from_luminance_without_mutating_input(self) -> None:
-        source = Image.new("RGB", (2, 1), (10, 10, 10))
-        source.putpixel((1, 0), (200, 200, 200))
-        output = apply_threshold_mask(source, 100)
-        self.assertEqual(output.getpixel((0, 0)), (0, 0, 0))
-        self.assertEqual(output.getpixel((1, 0)), (200, 200, 200))
-        self.assertEqual(source.getpixel((0, 0)), (10, 10, 10))
+    def test_resizes_a_smaller_overlay_and_reports_it(self) -> None:
+        base = Image.new("RGB", (8, 8), (0, 0, 50))
+        overlay = Image.new("RGB", (2, 2), (0, 0, 0))
+        overlay.putpixel((0, 0), (200, 100, 0))
+        output, details = compose_with_mask(base, overlay)
+        self.assertEqual(output.size, (8, 8))
+        self.assertEqual(details["Overlay resized"], "yes")
 
-    def test_rejects_when_no_pixels_under_the_threshold(self) -> None:
-        # Every pixel is 200, so nothing is under 50.
+    def test_rejects_an_all_black_overlay(self) -> None:
         with self.assertRaises(ValueError) as caught:
-            apply_threshold_mask(Image.new("L", (4, 4), 200), 50, keep_above=False)
-        self.assertIn("No pixels under the threshold", str(caught.exception))
-
-    def test_rejects_when_no_pixels_above_the_threshold(self) -> None:
-        with self.assertRaises(ValueError) as caught:
-            apply_threshold_mask(Image.new("L", (4, 4), 10), 50, keep_above=True)
-        self.assertIn("No pixels above the threshold", str(caught.exception))
-
-    def test_rejects_an_out_of_range_threshold(self) -> None:
-        with self.assertRaises(ValueError) as caught:
-            apply_threshold_mask(Image.new("L", (2, 2), 128), 300)
-        self.assertIn("0 and 255", str(caught.exception))
+            compose_with_mask(
+                Image.new("RGB", (4, 4), (1, 2, 3)),
+                Image.new("RGB", (4, 4), (0, 0, 0)),
+            )
+        self.assertIn("No mask pixels", str(caught.exception))
 
     def test_tool_cancelling_returns_none(self) -> None:
         document = ImageDocument()
-        document.current = Image.new("L", (8, 8), 180)
+        document.current = Image.new("RGB", (8, 8), (10, 20, 30))
         tool = MaskingTool()
-        tool._ask_mask_options = lambda _parent: None
+        tool._ask_images = lambda _parent: None
         self.assertIsNone(tool.run(None, document))
-
-    def test_tool_logs_under_threshold_choice(self) -> None:
-        document = ImageDocument()
-        document.current = Image.new("L", (8, 8), 40)
-        document.current.putpixel((0, 0), 200)
-        tool = MaskingTool()
-        tool._ask_mask_options = lambda _parent: (100, False)
-        result = tool.run(None, document)
-        self.assertEqual(result.details["Keep"], "under threshold")
-        self.assertEqual(result.details["Threshold"], 100)
-        self.assertEqual(result.image.getpixel((0, 0)), 0)
-        self.assertEqual(result.image.getpixel((1, 1)), 40)
 
 
 class HistogramTests(unittest.TestCase):
@@ -447,6 +431,65 @@ class ContrastStretchTests(unittest.TestCase):
         document.current.putpixel((7, 7), 200)
         tool = ContrastStretchTool()
         tool._ask_percentiles = lambda _parent: None
+        self.assertIsNone(tool.run(None, document))
+
+
+class EdgeVisualizationTests(unittest.TestCase):
+    def _structured_image(self) -> Image.Image:
+        arr = np.zeros((48, 48), dtype=np.uint8)
+        arr[10:38, 10:38] = 220
+        return Image.fromarray(arr, mode="L")
+
+    def test_paints_red_edges_on_the_original(self) -> None:
+        output, details = superimpose_edges(self._structured_image(), sigma=1.0, style="red")
+        self.assertEqual(output.mode, "RGB")
+        self.assertGreater(int(details["Edge pixels"].split("/")[0]), 0)
+        # At least one pure-red edge pixel should appear.
+        self.assertTrue(np.any(np.all(np.asarray(output) == (255, 0, 0), axis=-1)))
+
+    def test_rejects_a_flat_image_with_no_edges(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            superimpose_edges(Image.new("L", (32, 32), 90), sigma=1.0, style="red")
+        self.assertIn("No edges found", str(caught.exception))
+
+    def test_tool_cancelling_returns_none(self) -> None:
+        document = ImageDocument()
+        document.current = self._structured_image()
+        tool = EdgeVisualizationTool()
+        tool._ask_params = lambda _parent: None
+        self.assertIsNone(tool.run(None, document))
+
+
+class SharpenTests(unittest.TestCase):
+    def test_changes_a_soft_image_and_keeps_size(self) -> None:
+        arr = np.zeros((32, 32), dtype=np.uint8)
+        arr[:, :16] = 40
+        arr[:, 16:] = 200
+        source = Image.fromarray(arr, mode="L")
+        output = sharpen_image(source, radius=1.0, amount=1.5)
+        self.assertEqual(output.size, source.size)
+        self.assertEqual(output.mode, "L")
+        self.assertNotEqual(output.tobytes(), source.tobytes())
+
+    def test_rgb_stays_bright_with_default_parameters(self) -> None:
+        # Regression: skimage unsharp_mask(..., channel_axis=-1) could go black.
+        arr = np.full((48, 48, 3), 120, dtype=np.uint8)
+        arr[:, 24:, :] = 200
+        source = Image.fromarray(arr, mode="RGB")
+        output = sharpen_image(source, radius=2.0, amount=1.5)
+        self.assertEqual(output.mode, "RGB")
+        self.assertGreater(float(np.asarray(output).mean()), 50)
+
+    def test_rejects_a_non_positive_radius(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            sharpen_image(Image.new("L", (8, 8), 90), radius=0, amount=1.0)
+        self.assertIn("Radius", str(caught.exception))
+
+    def test_tool_cancelling_returns_none(self) -> None:
+        document = ImageDocument()
+        document.current = Image.new("RGB", (16, 16), (80, 90, 100))
+        tool = SharpenTool()
+        tool._ask_params = lambda _parent: None
         self.assertIsNone(tool.run(None, document))
 
 

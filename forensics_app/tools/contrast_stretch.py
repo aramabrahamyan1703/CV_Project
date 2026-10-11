@@ -95,7 +95,12 @@ class ContrastStretchTool(ForensicsTool):
             return None
         low, high = bounds
 
-        output = stretch_contrast(source, low, high)
+        try:
+            output = stretch_contrast(source, low, high)
+        except ValueError as error:
+            messagebox.showinfo(self.title, str(error), parent=parent)
+            return None
+
         sample = np.asarray(output.convert("L"))
         return ToolResult(
             image=output,

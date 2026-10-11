@@ -5,6 +5,7 @@ from __future__ import annotations
 import tkinter as tk
 
 import numpy as np
+import matplotlib.pyplot as plt
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 from PIL import Image
@@ -24,7 +25,9 @@ def compute_histogram(channel: np.ndarray) -> np.ndarray:
 def _figure_to_pil(figure: Figure) -> Image.Image:
     canvas = FigureCanvasAgg(figure)
     canvas.draw()
-    return Image.fromarray(np.asarray(canvas.buffer_rgba())).convert("RGB")
+    image = Image.fromarray(np.asarray(canvas.buffer_rgba())).convert("RGB")
+    plt.close(figure)  # avoid leaking figures when the tool is run repeatedly
+    return image
 
 
 class HistogramTool(ForensicsTool):

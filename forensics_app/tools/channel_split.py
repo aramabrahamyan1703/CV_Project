@@ -6,6 +6,7 @@ import math
 import tkinter as tk
 
 import numpy as np
+import matplotlib.pyplot as plt
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 from PIL import Image
@@ -148,4 +149,6 @@ class ChannelSplitTool(ForensicsTool):
         """Render a matplotlib figure off-screen and return it as a PIL RGB image."""
         canvas = FigureCanvasAgg(figure)
         canvas.draw()
-        return Image.fromarray(np.asarray(canvas.buffer_rgba())).convert("RGB")
+        image = Image.fromarray(np.asarray(canvas.buffer_rgba())).convert("RGB")
+        plt.close(figure)
+        return image
