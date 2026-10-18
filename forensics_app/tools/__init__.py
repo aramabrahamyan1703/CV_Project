@@ -18,6 +18,8 @@ from .skimage_filters import (
     UnsharpMaskTool,
 )
 from .canny import CannyEdgeTool
+from .hog import HOGTool
+from .hog_detection import HOGPersonDetectionTool
 
 
 def build_tool_registry() -> ToolRegistry:
@@ -38,6 +40,8 @@ def build_tool_registry() -> ToolRegistry:
             SobelFilterTool(),
             UnsharpMaskTool(),
             CannyEdgeTool(),
+            HOGTool(),
+            HOGPersonDetectionTool(),
         ]
     )
 

@@ -3,7 +3,8 @@ from tempfile import TemporaryDirectory
 import unittest
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
+from skimage import feature
 
 from forensics_app.core import ImageDocument
 from forensics_app.tools.base import ForensicsTool
@@ -18,6 +19,17 @@ from forensics_app.tools.convolution import (
 from forensics_app.tools.contrast_stretch import ContrastStretchTool, stretch_contrast
 from forensics_app.tools.edge_visualization import EdgeVisualizationTool, superimpose_edges
 from forensics_app.tools.grayscale import GrayscaleTool
+from forensics_app.tools.hog import HOGTool, descriptor_layout, extract_hog, parse_hog_params
+from forensics_app.tools.hog_detection import (
+    DetectionParams,
+    HOGPersonDetectionTool,
+    default_size_range,
+    match_hog_template,
+    parse_search_params,
+    plan_search,
+    pyramid_scales,
+    search_summary,
+)
 from forensics_app.tools.histogram import HistogramTool, compute_histogram
 from forensics_app.tools.masking import MaskingTool, compose_with_mask
 from forensics_app.tools.registry import ToolRegistry
@@ -860,6 +872,263 @@ class CannyEdgeTests(unittest.TestCase):
         document.current = Image.new("CMYK", (4, 4))
         self.assertFalse(CannyEdgeTool().is_available(document))
 
+
+class ParseHOGParamsTests(unittest.TestCase):
+    def test_accepts_whole_numbers_with_spaces(self) -> None:
+        self.assertEqual(parse_hog_params(" 9", "6 ", "3"), (9, 6, 3))
+
+    def test_rejects_bad_values_and_names_the_field(self) -> None:
+        cases = {
+            ("a", "6", "3"): "Orientations",
+            ("9", "2.5", "3"): "Pixels per cell",
+            ("9", "6", "0"): "Cells per block",
+            ("37", "6", "3"): "Orientations",
+        }
+        for fields, name in cases.items():
+            with self.subTest(fields=fields), self.assertRaises(ValueError) as caught:
+                parse_hog_params(*fields)
+            self.assertIn(name, str(caught.exception))
+
+
+class HOGTests(unittest.TestCase):
+    @staticmethod
+    def _noise_image(mode: str = "RGB") -> Image.Image:
+        # 36x48 px = 6x8 cells of 6 px, enough for 3x3-cell blocks.
+        noise = np.random.default_rng(0).integers(0, 256, (36, 48, 3)).astype(np.uint8)
+        return Image.fromarray(noise, mode="RGB").convert(mode)
+
+    def test_matches_skimage_called_directly(self) -> None:
+        source = self._noise_image()
+        descriptor, hog_image = extract_hog(
+            source, orientations=9, pixels_per_cell=6, cells_per_block=3
+        )
+        expected, expected_image = feature.hog(
+            np.asarray(source), orientations=9, pixels_per_cell=(6, 6),
+            cells_per_block=(3, 3), visualize=True, channel_axis=2,
+        )
+        np.testing.assert_array_equal(descriptor, expected)
+        np.testing.assert_array_equal(hog_image, expected_image)
+        self.assertEqual(hog_image.shape, (36, 48))
+
+    def test_grayscale_uses_no_channel_axis(self) -> None:
+        descriptor, _ = extract_hog(
+            self._noise_image("L"), orientations=4, pixels_per_cell=6, cells_per_block=3
+        )
+        # (6 - 3 + 1) x (8 - 3 + 1) blocks of 3x3 cells with 4 bins each.
+        self.assertEqual(descriptor.size, 4 * 6 * 3 * 3 * 4)
+
+    def test_descriptor_layout_predicts_the_footer_readout(self) -> None:
+        source = self._noise_image()
+        for orientations, ppc, cpb in ((9, 6, 3), (4, 5, 2), (2, 8, 1)):
+            with self.subTest(params=(orientations, ppc, cpb)):
+                options = dict(orientations=orientations, pixels_per_cell=ppc, cells_per_block=cpb)
+                cells, length = descriptor_layout(source.size, **options)
+                descriptor, _ = extract_hog(source, **options)
+                self.assertEqual(length, descriptor.size)
+                self.assertEqual(cells, (48 // ppc, 36 // ppc))
+
+    def test_rejects_an_image_smaller_than_one_block(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            extract_hog(Image.new("L", (10, 10)), orientations=9,
+                        pixels_per_cell=6, cells_per_block=3)
+        self.assertIn("smaller than one HOG block", str(caught.exception))
+
+    def test_tool_renders_original_and_hog_and_cancel_returns_none(self) -> None:
+        document = ImageDocument()
+        document.current = self._noise_image("RGBA")
+        tool = HOGTool()
+        tool._ask_params = lambda _parent, _source: None
+        self.assertIsNone(tool.run(None, document))
+        tool._ask_params = lambda _parent, _source: (9, 6, 3)
+        result = tool.run(None, document)
+        self.assertEqual(result.image.mode, "RGB")
+        self.assertGreater(result.image.width, result.image.height)  # two panels in a row
+        self.assertEqual(result.details["Orientations"], 9)
+        self.assertEqual(result.details["Descriptor length"], 4 * 6 * 9 * 9)
+        self.assertEqual(document.current.mode, "RGBA")
+
+    def test_unavailable_on_its_own_sheet_and_unsupported_modes(self) -> None:
+        document = ImageDocument()
+        document.current = self._noise_image()
+        tool = HOGTool()
+        self.assertTrue(tool.is_available(document))
+        document.apply(document.current, tool.tool_id)
+        self.assertFalse(tool.is_available(document))
+        self.assertIn("already shown", tool.unavailable_message(document))
+        document.current = Image.new("CMYK", (40, 40))
+        self.assertFalse(tool.is_available(document))
+
+
+class HOGPersonDetectionTests(unittest.TestCase):
+    OPTIONS = dict(orientations=9, pixels_per_cell=4, cells_per_block=2, step=4)
+
+    @staticmethod
+    def _scene(with_person: bool = True) -> Image.Image:
+        """A light background, a distractor box and (optionally) a stick-figure person."""
+        scene = Image.new("RGB", (160, 120), (200, 200, 200))
+        draw = ImageDraw.Draw(scene)
+        draw.rectangle((10, 60, 50, 80), fill=(120, 120, 120))
+        if with_person:
+            draw.ellipse((98, 20, 114, 36), fill=(40, 40, 40))  # head
+            draw.rectangle((94, 38, 118, 72), fill=(60, 60, 60))  # body
+            draw.rectangle((96, 72, 104, 100), fill=(50, 50, 50))  # legs
+            draw.rectangle((108, 72, 116, 100), fill=(50, 50, 50))
+        return scene
+
+    def setUp(self) -> None:
+        # The person occupies x 88..124, y 16..104; the template shows it at half size.
+        self.template = self._scene().crop((88, 16, 124, 104)).resize(
+            (18, 44), Image.Resampling.LANCZOS
+        )
+
+    def test_finds_an_exact_crop_at_one_scale(self) -> None:
+        noise = np.random.default_rng(1).integers(0, 256, (96, 128, 3)).astype(np.uint8)
+        scene = Image.fromarray(noise, mode="RGB")
+        # Non-square and off the diagonal, so a swapped row/col would miss it.
+        template = scene.crop((40, 16, 64, 64))
+        match = match_hog_template(
+            scene, template, orientations=16, pixels_per_cell=8, cells_per_block=2, step=8
+        )
+        self.assertEqual(match.euclidean.box, (40, 16, 24, 48))
+        self.assertAlmostEqual(match.euclidean.score, 0.0)
+        self.assertAlmostEqual(match.euclidean.similarity, 1.0)
+        # L2-Hys makes every block unit length, so no window out-scores an exact copy.
+        self.assertEqual(match.dot.box, (40, 16, 24, 48))
+        self.assertEqual(match.windows, 7 * 14)
+
+    def test_scales_find_a_person_larger_than_the_template(self) -> None:
+        single = match_hog_template(self._scene(), self.template, min_similarity=0.65, **self.OPTIONS)
+        self.assertFalse(single.euclidean.found)  # one size misses the 2× person
+
+        match = match_hog_template(
+            self._scene(), self.template, scales=pyramid_scales(50, 200),
+            min_similarity=0.65, **self.OPTIONS,
+        )
+        for found in (match.euclidean, match.dot):
+            self.assertTrue(found.found)
+            self.assertAlmostEqual(found.scale, 2.0)
+            self.assertEqual(found.box, (88, 16, 36, 88))
+
+    def test_reports_no_person_below_the_threshold(self) -> None:
+        match = match_hog_template(
+            self._scene(with_person=False), self.template, scales=pyramid_scales(50, 200),
+            min_similarity=0.65, **self.OPTIONS,
+        )
+        self.assertFalse(match.euclidean.found)
+        self.assertFalse(match.dot.found)
+        self.assertLess(match.dot.similarity, 0.65)
+
+    def test_without_a_minimum_the_best_window_is_always_marked(self) -> None:
+        search = parse_search_params("9", "4", "2", "4", "50", "200", "0")
+        self.assertEqual(search.min_similarity, 0.0)
+        document = ImageDocument()
+        document.current = self._scene(with_person=False)
+        tool = HOGPersonDetectionTool()
+        tool._ask_params = lambda _parent, _scene: DetectionParams(
+            Path("person.png"), self.template, search
+        )
+        result = tool.run(None, document)
+        self.assertIn("(no minimum set)", result.details["Euclidean similarity"])
+        self.assertIn("(no minimum set)", result.details["Dot product similarity"])
+        self.assertTrue(result.message.startswith("Euclidean distance and dot product picked"))
+        match = match_hog_template(
+            self._scene(with_person=False), self.template, scales=search.scales, **self.OPTIONS
+        )
+        self.assertTrue(match.euclidean.found and match.dot.found)  # both boxes drawn
+
+    def test_grayscale_scene_matches_too(self) -> None:
+        match = match_hog_template(
+            self._scene().convert("L"), self.template, scales=(2.0,), **self.OPTIONS
+        )
+        self.assertEqual(match.euclidean.box, (88, 16, 36, 88))
+
+    def test_default_size_range_runs_from_a_quarter_of_the_image_to_the_largest_fit(self) -> None:
+        # 50×130 template, 400 px tall image: 100 / 130 px up to 400 / 130 px.
+        self.assertEqual(default_size_range((300, 400), (50, 130)), (77, 307))
+        self.assertEqual(default_size_range((512, 512), (128, 128)), (100, 400))
+        self.assertEqual(default_size_range((1280, 960), (64, 128)), (188, 750))
+        self.assertEqual(default_size_range((1000, 400), (50, 130)), (77, 307))  # height limits
+        self.assertEqual(default_size_range((100, 60), (50, 130)), (46, 46))  # template too tall
+        self.assertEqual(default_size_range((300, 400), (50, 400)), (50, 100))  # 25% floored at 50%
+        self.assertEqual(default_size_range((9000, 9000), (20, 20)), (1000, 1000))  # field limit
+
+    def test_default_smallest_person_rises_until_the_search_fits_the_time_limit(self) -> None:
+        # A quarter of 512 px is half this template's height: a 99 s search.
+        smallest, largest = default_size_range((512, 512), (128, 256))
+        self.assertGreater(smallest, 50)
+        levels = plan_search(  # raises if the default search is still too slow
+            (512, 512), (128, 256), pixels_per_cell=8, cells_per_block=2, step=8,
+            scales=pyramid_scales(smallest, largest),
+        )
+        self.assertEqual(levels[-1].scale, largest / 100)
+
+    def test_pyramid_scales_are_about_a_quarter_apart(self) -> None:
+        scales = pyramid_scales(50, 200)
+        self.assertEqual(len(scales), 7)
+        self.assertAlmostEqual(scales[0], 0.5)
+        self.assertAlmostEqual(scales[3], 1.0)
+        self.assertAlmostEqual(scales[-1], 2.0)
+        self.assertEqual(pyramid_scales(100, 100), (1.0,))
+
+    def test_plan_counts_windows_and_skips_scales_that_do_not_fit(self) -> None:
+        sizes = dict(pixels_per_cell=8, cells_per_block=2, step=8)
+        (level,) = plan_search((24, 48), (24, 48), **sizes)
+        self.assertEqual(level.windows, 1)  # the last position is included
+        levels = plan_search((48, 96), (24, 48), scales=(1.0, 2.0, 4.0), **sizes)
+        self.assertEqual([lv.scale for lv in levels], [1.0, 2.0])
+        self.assertEqual(levels[1].size, (24, 48))
+        self.assertEqual(search_summary(levels, 3, (24, 48)), "2 of 3 scales · 29 windows · under 1 s")
+
+    def test_rejects_searches_that_cannot_run(self) -> None:
+        sizes = dict(pixels_per_cell=8, cells_per_block=2)
+        with self.assertRaises(ValueError) as caught:
+            plan_search((20, 20), (24, 48), step=8, **sizes)
+        self.assertIn("at most 42%", str(caught.exception))
+        with self.assertRaises(ValueError) as caught:
+            plan_search((128, 96), (10, 48), step=8, **sizes)
+        self.assertIn("smaller than one HOG block", str(caught.exception))
+        with self.assertRaises(ValueError) as caught:
+            plan_search((4000, 3000), (24, 48), step=1, **sizes)
+        self.assertIn("Step size", str(caught.exception))
+
+    def test_parse_validates_fields_and_the_size_range(self) -> None:
+        search = parse_search_params("16", "8", "2", "4", "50", "200", "65")
+        self.assertEqual(search.step, 4)
+        self.assertEqual(len(search.scales), 7)
+        self.assertAlmostEqual(search.min_similarity, 0.65)
+        with self.assertRaises(ValueError) as caught:
+            parse_search_params("16", "8", "2", "0", "50", "200", "65")
+        self.assertIn("Step size", str(caught.exception))
+        with self.assertRaises(ValueError) as caught:
+            parse_search_params("16", "8", "2", "8", "300", "200", "65")
+        self.assertIn("Smallest person", str(caught.exception))
+
+    def test_tool_draws_the_sheet_and_cancel_returns_none(self) -> None:
+        document = ImageDocument()
+        document.current = self._scene().convert("RGBA")
+        tool = HOGPersonDetectionTool()
+        tool._ask_params = lambda _parent, _scene: None
+        self.assertIsNone(tool.run(None, document))
+        search = parse_search_params("9", "4", "2", "4", "50", "200", "65")
+        params = DetectionParams(Path("person.png"), self.template, search)
+        tool._ask_params = lambda _parent, _scene: params
+        result = tool.run(None, document)
+        self.assertEqual(result.image.mode, "RGB")
+        self.assertEqual(result.details["Euclidean best"], "x=88, y=16, 36×88 (2.00×)")
+        self.assertIn("person found", result.details["Dot product similarity"])
+        self.assertEqual(result.details["Template"], "person.png (18×44)")
+        self.assertEqual(result.message, "Both methods found a person in the same window.")
+        self.assertEqual(document.current.mode, "RGBA")
+
+    def test_unavailable_on_its_own_sheet_and_unsupported_modes(self) -> None:
+        document = ImageDocument()
+        document.current = self._scene()
+        tool = HOGPersonDetectionTool()
+        self.assertTrue(tool.is_available(document))
+        document.apply(document.current, tool.tool_id)
+        self.assertFalse(tool.is_available(document))
+        document.current = Image.new("CMYK", (40, 40))
+        self.assertFalse(tool.is_available(document))
 
 if __name__ == "__main__":
     unittest.main()
