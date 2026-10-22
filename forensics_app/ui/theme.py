@@ -29,6 +29,7 @@ ACCENT_HOVER = "#1C3AA6"
 ACCENT_PRESSED = "#172F88"
 ACCENT_SOFT = "#DCE3F8"
 ON_ACCENT = "#FFFFFF"
+DANGER = "#B42318"  # inline validation messages in tool dialogs
 
 # First installed family wins, so the app looks intended on macOS, Windows
 # and Linux alike.
@@ -86,12 +87,25 @@ def apply_theme(root: tk.Misc) -> Fonts:
     style.configure("Surface.TFrame", background=SURFACE)
     style.configure("Line.TFrame", background=LINE)
     style.configure("Ruler.TFrame", background=RULER)
+    style.configure("Preview.TFrame", background=CANVAS)
 
     style.configure("TLabel", background=PANEL, foreground=INK)
     style.configure("Heading.TLabel", font=fonts.heading)
     style.configure("Section.TLabel", font=fonts.section, foreground=MUTED)
     style.configure("Surface.TLabel", background=SURFACE)
     style.configure("Readout.TLabel", background=SURFACE, foreground=MUTED, font=fonts.mono)
+    style.configure("Strong.TLabel", font=fonts.strong)
+    style.configure("Hint.TLabel", foreground=MUTED, font=fonts.hint)
+    style.configure("Error.TLabel", background=SURFACE, foreground=DANGER, font=fonts.hint)
+    # A tool dialog's image thumbnail sits on the same 18% grey as the main canvas.
+    style.configure(
+        "Preview.TLabel",
+        background=CANVAS,
+        foreground=CANVAS_HINT,
+        font=fonts.hint,
+        anchor="center",
+        justify="center",
+    )
     style.configure("Ruler.TLabel", background=RULER, foreground=MUTED, font=fonts.mono_small)
 
     # Dialog buttons (Apply / Cancel) and anything else unstyled.
@@ -209,6 +223,23 @@ def apply_theme(root: tk.Misc) -> Fonts:
     style.configure("TRadiobutton", background=PANEL)
     style.configure("TCombobox", fieldbackground=SURFACE, background=SURFACE, bordercolor=LINE)
     style.configure("TEntry", fieldbackground=SURFACE, bordercolor=LINE)
+    style.configure(
+        "TSpinbox",
+        fieldbackground=SURFACE,
+        background=SURFACE,
+        bordercolor=LINE,
+        lightcolor=SURFACE,
+        darkcolor=SURFACE,
+        arrowcolor=MUTED,
+        padding=(6, 3),
+    )
+    style.map(
+        "TSpinbox",
+        bordercolor=[("focus", ACCENT)],
+        lightcolor=[("focus", ACCENT)],
+        darkcolor=[("focus", ACCENT)],
+        background=[("active", HOVER)],
+    )
 
     if isinstance(root, (tk.Tk, tk.Toplevel)):
         root.configure(background=PANEL)
