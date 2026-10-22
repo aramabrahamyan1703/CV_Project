@@ -378,6 +378,17 @@ class MaskingTests(unittest.TestCase):
             )
         self.assertIn("No mask pixels", str(caught.exception))
 
+    def test_inverted_mask_fills_the_background_instead(self) -> None:
+        base = Image.new("RGB", (4, 4), (10, 20, 30))
+        overlay = Image.new("RGB", (4, 4), (0, 0, 0))
+        overlay.putpixel((1, 1), (255, 200, 0))
+        texture = Image.new("RGB", (4, 4), (7, 8, 9))
+        output, details = compose_with_mask(base, overlay, texture, invert=True)
+        # Coat pixel stays as the base; everywhere else gets the texture (~mask).
+        self.assertEqual(output.getpixel((1, 1)), (10, 20, 30))
+        self.assertEqual(output.getpixel((0, 0)), (7, 8, 9))
+        self.assertEqual(details["Invert mask"], "yes")
+
     def test_tool_cancelling_returns_none(self) -> None:
         document = ImageDocument()
         document.current = Image.new("RGB", (8, 8), (10, 20, 30))
