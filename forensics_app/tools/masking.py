@@ -39,12 +39,15 @@ def compose_with_mask(
     texture: Image.Image | None = None,
     *,
     threshold: int = 10,
+    invert: bool = False,
 ) -> tuple[Image.Image, dict[str, object]]:
     """Paste ``overlay`` (or ``texture``) onto ``base`` where the overlay is not black.
 
     Matches the Set 2 coat / model / textured-coat demo: black in the overlay is
     transparent; non-black pixels replace the base (or are filled from a texture).
-    Overlay and texture are resized to the base size when needed.
+    With ``invert=True`` the mask is flipped (``~mask``), so the black/background
+    region is filled instead. Overlay and texture are resized to the base size
+    when needed.
     """
     if base.mode not in ("L", "RGB", "RGBA", "P"):
         raise ValueError(
@@ -59,11 +62,14 @@ def compose_with_mask(
         overlay_rgb = overlay_rgb.resize(base_rgb.size, Image.Resampling.NEAREST)
 
     mask = build_foreground_mask(overlay_rgb, threshold)
+    if invert:
+        mask = ~mask
     if not mask.any():
+        side = "inverted mask" if invert else "mask"
         raise ValueError(
-            f"No mask pixels found (everything is at or under threshold {threshold}).\n\n"
+            f"No {side} pixels found (threshold {threshold}).\n\n"
             "Use an overlay with a dark background and a brighter subject, "
-            "or lower the black threshold."
+            "lower the black threshold, or turn invert off/on."
         )
 
     out = np.asarray(base_rgb).copy()
@@ -82,6 +88,7 @@ def compose_with_mask(
     details: dict[str, object] = {
         "Mask pixels": f"{int(mask.sum())} / {mask.size}",
         "Black threshold": threshold,
+        "Invert mask": "yes" if invert else "no",
         "Fill": fill,
         "Overlay resized": "yes" if resized_overlay else "no",
         "Texture resized": ("yes" if resized_texture else "no") if texture is not None else "n/a",
@@ -96,7 +103,7 @@ class MaskingTool(ForensicsTool):
     category = "Color"
     description = (
         "Composite an overlay (coat) onto the working image; "
-        "optionally fill the mask with a texture."
+        "optionally invert the mask and/or fill it with a texture."
     )
 
     ACCEPTED_MODES = ("L", "RGB", "RGBA", "P")
@@ -120,10 +127,10 @@ class MaskingTool(ForensicsTool):
         assert source is not None
         assert source.mode in self.ACCEPTED_MODES, f"unsupported mode {source.mode!r}"
 
-        paths = self._ask_images(parent)
-        if paths is None:
+        choice = self._ask_images(parent)
+        if choice is None:
             return None
-        overlay_path, texture_path = paths
+        overlay_path, texture_path, invert = choice
 
         try:
             overlay = Image.open(overlay_path)
@@ -137,6 +144,7 @@ class MaskingTool(ForensicsTool):
                 overlay,
                 texture,
                 threshold=self.DEFAULT_THRESHOLD,
+                invert=invert,
             )
         except (OSError, ValueError) as error:
             messagebox.showerror(self.title, str(error), parent=parent)
@@ -146,16 +154,17 @@ class MaskingTool(ForensicsTool):
         if texture_path is not None:
             details["Texture"] = texture_path.name
         fill = info["Fill"]
+        invert_note = ", inverted mask" if invert else ""
         return ToolResult(
             image=output,
-            message=f"Composited overlay onto the image ({fill}).",
+            message=f"Composited overlay onto the image ({fill}{invert_note}).",
             details=details,
         )
 
     def _ask_images(
         self, parent: tk.Misc | None
-    ) -> tuple[Path, Path | None] | None:
-        """Ask for the overlay (required) and an optional texture."""
+    ) -> tuple[Path, Path | None, bool] | None:
+        """Ask for overlay, optional invert, and optional texture."""
         overlay_name = filedialog.askopenfilename(
             parent=parent,
             title="Choose overlay / mask image (e.g. coat.png)",
@@ -163,6 +172,14 @@ class MaskingTool(ForensicsTool):
         )
         if not overlay_name:
             return None
+
+        invert = messagebox.askyesno(
+            self.title,
+            "Invert the mask?\n\n"
+            "No → paste where the overlay is bright (coat).\n"
+            "Yes → paste where the overlay is black (~mask).",
+            parent=parent,
+        )
 
         use_texture = messagebox.askyesno(
             self.title,
@@ -182,4 +199,4 @@ class MaskingTool(ForensicsTool):
                 return None
             texture_path = Path(texture_name)
 
-        return Path(overlay_name), texture_path
+        return Path(overlay_name), texture_path, bool(invert)

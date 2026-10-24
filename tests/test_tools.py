@@ -32,6 +32,7 @@ from forensics_app.tools.hog_detection import (
 )
 from forensics_app.tools.histogram import HistogramTool, compute_histogram
 from forensics_app.tools.masking import MaskingTool, compose_with_mask
+from forensics_app.tools.ncc import NCCTool, compute_ncc
 from forensics_app.tools.registry import ToolRegistry
 from forensics_app.tools.sharpen import SharpenTool, sharpen_image
 from forensics_app.tools.skimage_filters import (
@@ -43,6 +44,21 @@ from forensics_app.tools.skimage_filters import (
     median_filter,
     sobel_edges,
     unsharp_mask,
+)
+from forensics_app.tools.template_matching import (
+    Match as TemplateMatch,
+    TemplateMatchingTool,
+    find_template_matches,
+    parse_match_params,
+    rotate_template,
+    superimpose_matches,
+)
+from forensics_app.tools.corners import CornerDetectionTool, detect_corners, parse_corner_params
+from forensics_app.tools.descriptors import (
+    DescriptorTool,
+    extract_descriptors,
+    parse_descriptor_params,
+    render_keypoints,
 )
 
 
@@ -389,6 +405,17 @@ class MaskingTests(unittest.TestCase):
                 Image.new("RGB", (4, 4), (0, 0, 0)),
             )
         self.assertIn("No mask pixels", str(caught.exception))
+
+    def test_inverted_mask_fills_the_background_instead(self) -> None:
+        base = Image.new("RGB", (4, 4), (10, 20, 30))
+        overlay = Image.new("RGB", (4, 4), (0, 0, 0))
+        overlay.putpixel((1, 1), (255, 200, 0))
+        texture = Image.new("RGB", (4, 4), (7, 8, 9))
+        output, details = compose_with_mask(base, overlay, texture, invert=True)
+        # Coat pixel stays as the base; everywhere else gets the texture (~mask).
+        self.assertEqual(output.getpixel((1, 1)), (10, 20, 30))
+        self.assertEqual(output.getpixel((0, 0)), (7, 8, 9))
+        self.assertEqual(details["Invert mask"], "yes")
 
     def test_tool_cancelling_returns_none(self) -> None:
         document = ImageDocument()
@@ -1129,6 +1156,210 @@ class HOGPersonDetectionTests(unittest.TestCase):
         self.assertFalse(tool.is_available(document))
         document.current = Image.new("CMYK", (40, 40))
         self.assertFalse(tool.is_available(document))
+
+
+class NCCTests(unittest.TestCase):
+    def test_exact_crop_peaks_at_one_with_pad_input(self) -> None:
+        # Textured scene: a constant patch makes NCC undefined (zero std).
+        noise = np.random.default_rng(0).integers(0, 256, (30, 40), dtype=np.uint8)
+        scene = Image.fromarray(noise, mode="L")
+        template = scene.crop((12, 8, 20, 16))
+        ncc = compute_ncc(scene, template)
+        self.assertEqual(ncc.shape, (30, 40))
+        peak = float(np.nanmax(ncc))
+        self.assertGreater(peak, 0.99)
+        row, col = np.unravel_index(int(np.nanargmax(ncc)), ncc.shape)
+        # pad_input centres the template, so the peak is at the patch centre.
+        self.assertEqual((int(row), int(col)), (8 + 4, 12 + 4))
+
+    def test_matches_skimage_match_template(self) -> None:
+        noise = np.random.default_rng(0).integers(0, 256, (48, 64), dtype=np.uint8)
+        scene = Image.fromarray(noise, mode="L")
+        template = scene.crop((10, 12, 26, 28))
+        expected = feature.match_template(
+            np.asarray(scene, dtype=np.float64) / 255.0,
+            np.asarray(template, dtype=np.float64) / 255.0,
+            pad_input=True,
+        )
+        np.testing.assert_allclose(compute_ncc(scene, template), expected)
+
+    def test_rejects_a_template_larger_than_the_scene(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            compute_ncc(Image.new("L", (20, 20)), Image.new("L", (30, 10)))
+        self.assertIn("larger", str(caught.exception).lower())
+
+    def test_tool_renders_sheet_and_cancel_returns_none(self) -> None:
+        document = ImageDocument()
+        noise = np.random.default_rng(3).integers(0, 256, (36, 48, 3), dtype=np.uint8)
+        document.current = Image.fromarray(noise, mode="RGB")
+        template = document.current.crop((4, 4, 12, 12))
+        tool = NCCTool()
+        tool._ask_template = lambda _parent: None
+        self.assertIsNone(tool.run(None, document))
+        tool._ask_template = lambda _parent: template
+        result = tool.run(None, document)
+        self.assertEqual(result.image.mode, "RGB")
+        # Slide: Original | Template | NCC  → three panels wide.
+        self.assertGreater(result.image.width, result.image.height * 2)
+        self.assertEqual(result.details["Function"], "skimage.feature.match_template")
+        self.assertEqual(document.current.mode, "RGB")
+
+    def test_unavailable_on_its_own_sheet(self) -> None:
+        document = ImageDocument()
+        document.current = Image.new("RGB", (40, 40))
+        tool = NCCTool()
+        document.apply(document.current, tool.tool_id)
+        self.assertFalse(tool.is_available(document))
+
+
+class TemplateMatchingTests(unittest.TestCase):
+    def test_parse_match_params_reads_angle_and_threshold_percent(self) -> None:
+        angle, threshold = parse_match_params("15", "80")
+        self.assertEqual(angle, 15)
+        self.assertAlmostEqual(threshold, 0.8)
+
+    def test_parse_rejects_threshold_outside_0_100(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            parse_match_params("0", "101")
+        self.assertIn("Threshold", str(caught.exception))
+
+    def test_rotate_keeps_content_and_changes_size_when_angled(self) -> None:
+        template = Image.new("L", (10, 6), 0)
+        ImageDraw.Draw(template).rectangle((2, 1, 7, 4), fill=255)
+        rotated = rotate_template(template, 90)
+        self.assertEqual(rotated.size, (6, 10))
+
+    def test_finds_an_exact_unrotated_match_above_threshold(self) -> None:
+        noise = np.random.default_rng(2).integers(0, 256, (40, 50), dtype=np.uint8)
+        scene = Image.fromarray(noise, mode="L")
+        template = scene.crop((18, 12, 26, 20))
+        matches = find_template_matches(scene, template, angle=0, threshold=0.9)
+        self.assertGreaterEqual(len(matches), 1)
+        best = max(matches, key=lambda m: m.score)
+        self.assertAlmostEqual(best.score, 1.0, places=5)
+        self.assertEqual(best.box[:2], (18, 12))  # x, y
+
+    def test_superimpose_draws_a_red_marker_on_the_match(self) -> None:
+        scene = Image.new("RGB", (40, 30), (200, 200, 200))
+        matches = (TemplateMatch(box=(5, 4, 10, 8), score=0.95),)
+        out = superimpose_matches(scene, matches)
+        pixels = np.asarray(out)
+        cx, cy = matches[0].centre
+        # Slide marker: hollow red circle around the match centre on a dimmed image.
+        self.assertLess(int(pixels[cy, cx].mean()), 120)  # dimmed interior
+        ring = pixels[cy - 4 : cy + 5, cx - 4]
+        self.assertTrue(np.any(ring[:, 0] > 200))  # red outline nearby
+
+    def test_tool_cancel_returns_none(self) -> None:
+        document = ImageDocument()
+        document.current = Image.new("RGB", (40, 30), (50, 50, 50))
+        tool = TemplateMatchingTool()
+        tool._ask_template = lambda _parent: None
+        self.assertIsNone(tool.run(None, document))
+
+
+class CornerDetectionTests(unittest.TestCase):
+    def test_parse_corner_params(self) -> None:
+        method, threshold_rel, min_distance = parse_corner_params("harris", "20", "5")
+        self.assertEqual(method, "harris")
+        self.assertAlmostEqual(threshold_rel, 0.2)
+        self.assertEqual(min_distance, 5)
+
+    def test_parse_rejects_unknown_method(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            parse_corner_params("blob", "10", "1")
+        self.assertIn("harris", str(caught.exception).lower())
+
+    def test_harris_finds_corners_of_a_square(self) -> None:
+        image = Image.new("L", (64, 64), 0)
+        ImageDraw.Draw(image).rectangle((16, 16, 47, 47), fill=255)
+        corners, response = detect_corners(
+            image, method="harris", threshold_rel=0.1, min_distance=3
+        )
+        self.assertGreaterEqual(len(corners), 4)
+        self.assertEqual(response.shape, (64, 64))
+
+    def test_fast_finds_corners_of_a_square(self) -> None:
+        # FAST needs intensity variation around candidate points; solid shapes
+        # often yield an empty response, while letter strokes do not.
+        image = Image.new("L", (120, 60), 0)
+        ImageDraw.Draw(image).text((8, 12), "CORNER", fill=255)
+        corners, response = detect_corners(
+            image, method="fast", threshold_rel=0.05, min_distance=2
+        )
+        self.assertGreaterEqual(len(corners), 1)
+        self.assertEqual(response.shape, (60, 120))
+
+    def test_tool_cancel_returns_none(self) -> None:
+        document = ImageDocument()
+        document.current = Image.new("RGB", (48, 48), (80, 80, 80))
+        tool = CornerDetectionTool()
+        tool._ask_params = lambda _parent, _source: None
+        self.assertIsNone(tool.run(None, document))
+
+    def test_tool_overlays_corners(self) -> None:
+        document = ImageDocument()
+        image = Image.new("RGB", (64, 64), (0, 0, 0))
+        ImageDraw.Draw(image).rectangle((16, 16, 47, 47), fill=(255, 255, 255))
+        document.current = image
+        tool = CornerDetectionTool()
+        tool._ask_params = lambda _parent, _source: ("harris", 0.1, 3)
+        result = tool.run(None, document)
+        self.assertEqual(result.image.mode, "RGB")
+        # Slide: response map | peaks overlay → wide sheet.
+        self.assertGreater(result.image.width, result.image.height)
+        self.assertGreater(int(result.details["Corners"]), 0)
+
+
+class DescriptorTests(unittest.TestCase):
+    def test_parse_descriptor_params(self) -> None:
+        orb = parse_descriptor_params("orb", "50")
+        self.assertEqual(orb.method, "orb")
+        self.assertEqual(orb.n_keypoints, 50)
+        sift = parse_descriptor_params("sift", "6", "3", "16")
+        self.assertEqual(sift.method, "sift")
+        self.assertEqual(sift.n_octaves, 6)
+        self.assertEqual(sift.n_scales, 3)
+        self.assertAlmostEqual(sift.sigma_min, 1.6)
+
+    def test_parse_rejects_unknown_method(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            parse_descriptor_params("brief", "10")
+        self.assertIn("orb", str(caught.exception).lower())
+
+    def test_orb_returns_keypoints_on_a_textured_image(self) -> None:
+        noise = np.random.default_rng(0).integers(0, 256, (80, 80), dtype=np.uint8)
+        image = Image.fromarray(noise, mode="L")
+        keypoints, descriptors = extract_descriptors(image, method="orb", n_keypoints=20)
+        self.assertGreater(len(keypoints), 0)
+        self.assertEqual(len(descriptors), len(keypoints))
+
+    def test_sift_returns_keypoints_on_a_textured_image(self) -> None:
+        noise = np.random.default_rng(1).integers(0, 256, (96, 96), dtype=np.uint8)
+        image = Image.fromarray(noise, mode="L")
+        keypoints, descriptors = extract_descriptors(
+            image, method="sift", n_octaves=4, n_scales=3, sigma_min=1.6
+        )
+        self.assertGreater(len(keypoints), 0)
+        self.assertEqual(len(descriptors), len(keypoints))
+
+    def test_render_keypoints_keeps_size(self) -> None:
+        image = Image.new("RGB", (40, 30), (30, 30, 30))
+        keypoints = np.array([[10.0, 12.0], [20.0, 8.0]])
+        out = render_keypoints(image, keypoints)
+        self.assertEqual(out.size, image.size)
+        self.assertEqual(out.mode, "RGB")
+        # Hollow red outline at the first keypoint.
+        pixels = np.asarray(out)
+        self.assertGreater(int(pixels[10, 12 + 4, 0]), 200)
+
+    def test_tool_cancel_returns_none(self) -> None:
+        document = ImageDocument()
+        document.current = Image.new("RGB", (64, 64), (40, 40, 40))
+        tool = DescriptorTool()
+        tool._ask_params = lambda _parent, _source: None
+        self.assertIsNone(tool.run(None, document))
+
 
 if __name__ == "__main__":
     unittest.main()
