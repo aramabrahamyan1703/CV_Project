@@ -24,6 +24,8 @@ from .hog import HOGTool
 from .hog_detection import HOGPersonDetectionTool
 from .corners import CornerDetectionTool
 from .descriptors import DescriptorTool
+from .image_lookup import ImageLookupTool
+from .matching import FeatureMatchingTool
 
 
 def build_tool_registry() -> ToolRegistry:
@@ -50,6 +52,8 @@ def build_tool_registry() -> ToolRegistry:
             HOGPersonDetectionTool(),
             CornerDetectionTool(),
             DescriptorTool(),
+            FeatureMatchingTool(),
+            ImageLookupTool(),
         ]
     )
 

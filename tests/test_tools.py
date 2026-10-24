@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 from PIL import Image, ImageDraw
-from skimage import feature
+from skimage import data, feature
 
 from forensics_app.core import ImageDocument
 from forensics_app.tools.base import ForensicsTool
@@ -55,10 +55,29 @@ from forensics_app.tools.template_matching import (
 )
 from forensics_app.tools.corners import CornerDetectionTool, detect_corners, parse_corner_params
 from forensics_app.tools.descriptors import (
+    DescriptorParams,
     DescriptorTool,
     extract_descriptors,
+    metric_for,
     parse_descriptor_params,
     render_keypoints,
+)
+from forensics_app.tools.image_lookup import (
+    ImageLookupTool,
+    LookupRequest,
+    consistent_matches,
+    find_closest_image,
+    list_images,
+    shrink,
+)
+from forensics_app.tools.matching import (
+    FeatureMatchingTool,
+    MatchingRequest,
+    MatchParams,
+    closest,
+    match_images,
+    matching_summary,
+    parse_matching_params,
 )
 
 
@@ -1359,6 +1378,165 @@ class DescriptorTests(unittest.TestCase):
         tool = DescriptorTool()
         tool._ask_params = lambda _parent, _source: None
         self.assertIsNone(tool.run(None, document))
+
+
+class DescriptorEdgeCaseTests(unittest.TestCase):
+    def test_a_flat_image_gives_a_message_instead_of_crashing(self) -> None:
+        flat = Image.new("L", (64, 64), 120)
+        for method in ("orb", "sift"):
+            with self.subTest(method=method), self.assertRaises(ValueError) as caught:
+                extract_descriptors(flat, method=method)
+            self.assertIn("No keypoints found", str(caught.exception))
+
+    def test_metric_follows_the_descriptor_type(self) -> None:
+        self.assertEqual(metric_for("orb"), "hamming")
+        self.assertEqual(metric_for("SIFT"), "euclidean")
+
+
+def _astronaut() -> Image.Image:
+    return Image.fromarray(data.astronaut())
+
+
+def _rotated_view(image: Image.Image) -> Image.Image:
+    """The same scene turned, cropped and darkened: what a second photo might give."""
+    view = image.rotate(12, expand=True).crop((60, 60, 520, 520))
+    return Image.eval(view, lambda value: int(value * 0.8))
+
+
+class FeatureMatchingTests(unittest.TestCase):
+    ORB = DescriptorParams("orb", n_keypoints=200)
+
+    def test_parse_turns_the_ratio_percentage_into_a_fraction(self) -> None:
+        params = parse_matching_params(self.ORB, False, "75", "0")
+        self.assertEqual((params.cross_check, params.max_ratio, params.lines), (False, 0.75, 0))
+        self.assertEqual(matching_summary(params), "hamming · no cross-check · ratio 0.75")
+        with self.assertRaises(ValueError) as caught:
+            parse_matching_params(self.ORB, True, "150", "50")
+        self.assertIn("Max ratio", str(caught.exception))
+
+    def test_the_same_scene_matches_far_more_than_an_unrelated_one(self) -> None:
+        reference = _astronaut()
+        same = match_images(reference, _rotated_view(reference), MatchParams(self.ORB))
+        other = match_images(reference, Image.fromarray(data.coffee()), MatchParams(self.ORB))
+        self.assertGreater(len(same.matches), 20)
+        self.assertGreater(len(same.matches), 5 * max(len(other.matches), 1))
+        self.assertEqual(same.metric, "hamming")
+        self.assertEqual(len(same.distances), len(same.matches))
+
+    def test_sift_matches_with_the_euclidean_metric(self) -> None:
+        reference = _astronaut().resize((256, 256))
+        result = match_images(reference, reference.rotate(10), MatchParams(DescriptorParams("sift")))
+        self.assertEqual(result.metric, "euclidean")
+        self.assertGreater(len(result.matches), 20)
+
+    def test_looser_settings_never_find_fewer_matches(self) -> None:
+        reference = _astronaut()
+        view = _rotated_view(reference)
+        strict = match_images(reference, view, MatchParams(self.ORB, True, 0.6))
+        loose = match_images(reference, view, MatchParams(self.ORB, False, 1.0))
+        self.assertGreaterEqual(len(loose.matches), len(strict.matches))
+
+    def test_closest_keeps_the_smallest_distances(self) -> None:
+        matches = np.array([[0, 0], [1, 1], [2, 2]])
+        distances = np.array([0.5, 0.1, 0.3])
+        self.assertEqual(closest(matches, distances, 2).tolist(), [[1, 1], [2, 2]])
+        self.assertEqual(len(closest(matches, distances, 0)), 3)
+
+    def test_tool_draws_the_pair_and_cancel_returns_none(self) -> None:
+        document = ImageDocument()
+        document.current = _astronaut()
+        tool = FeatureMatchingTool()
+        tool._ask_params = lambda _parent, _source: None
+        self.assertIsNone(tool.run(None, document))
+        second = _rotated_view(document.current)
+        params = MatchParams(self.ORB, lines=10)
+        tool._ask_params = lambda _parent, _source: MatchingRequest(Path("view.png"), second, params)
+        result = tool.run(None, document)
+        self.assertEqual(result.image.mode, "RGB")
+        self.assertGreater(result.image.width, result.image.height)  # side by side
+        self.assertEqual(result.details["Metric"], "hamming")
+        self.assertEqual(result.details["Lines drawn"], 10)
+        self.assertGreater(result.details["Matches"], 10)
+
+    def test_unavailable_on_its_own_sheet(self) -> None:
+        document = ImageDocument()
+        document.current = _astronaut()
+        tool = FeatureMatchingTool()
+        self.assertTrue(tool.is_available(document))
+        document.apply(document.current, tool.tool_id)
+        self.assertFalse(tool.is_available(document))
+
+
+class ImageLookupTests(unittest.TestCase):
+    ORB = MatchParams(DescriptorParams("orb", n_keypoints=200))
+
+    def setUp(self) -> None:
+        self._tmp = TemporaryDirectory()
+        self.folder = Path(self._tmp.name)
+        reference = _astronaut()
+        reference.save(self.folder / "astronaut_1.png")
+        _rotated_view(reference).save(self.folder / "astronaut_2.jpg")
+        for name in ("coffee", "chelsea", "camera"):
+            Image.fromarray(getattr(data, name)()).save(self.folder / f"{name}.png")
+        (self.folder / "notes.png").write_text("not an image")
+        (self.folder / "readme.txt").write_text("ignored: not an image extension")
+        (self.folder / "sub").mkdir()
+        reference.save(self.folder / "sub" / "copy.png")  # subfolders are not searched
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_lists_images_only_and_excludes_the_reference(self) -> None:
+        names = [p.name for p in list_images(self.folder, self.folder / "astronaut_1.png")]
+        self.assertEqual(
+            names, ["astronaut_2.jpg", "camera.png", "chelsea.png", "coffee.png", "notes.png"]
+        )
+
+    def test_the_other_view_wins_under_both_rankings(self) -> None:
+        paths = list_images(self.folder, self.folder / "astronaut_1.png")
+        for ranking in ("ransac", "matches"):
+            with self.subTest(ranking=ranking):
+                lookup = find_closest_image(_astronaut(), paths, self.ORB, ranking)
+                self.assertEqual(lookup.ranked[0].path.name, "astronaut_2.jpg")
+                self.assertEqual(lookup.skipped, (("notes.png", "not a readable image"),))
+                self.assertEqual(len(lookup.ranked), 4)
+
+    def test_ransac_keeps_consistent_matches_and_rejects_too_few(self) -> None:
+        paths = [self.folder / "astronaut_2.jpg"]
+        best = find_closest_image(_astronaut(), paths, self.ORB).ranked[0]
+        self.assertGreater(best.consistent_count, 0.8 * best.match_count)
+        few = np.array([[0, 0], [1, 1], [2, 2]])
+        keypoints = np.array([[1.0, 1.0], [5.0, 9.0], [20.0, 3.0]])
+        self.assertFalse(consistent_matches(keypoints, keypoints, few, (40, 40)).any())
+
+    def test_large_images_are_shrunk_and_small_ones_kept(self) -> None:
+        self.assertEqual(shrink(Image.new("RGB", (1600, 1200))).size, (640, 480))
+        self.assertEqual(shrink(Image.new("L", (300, 200))).size, (300, 200))
+
+    def test_an_empty_or_unreadable_folder_is_reported(self) -> None:
+        with self.assertRaises(ValueError):
+            find_closest_image(_astronaut(), [], self.ORB)
+        with self.assertRaises(ValueError) as caught:
+            find_closest_image(_astronaut(), [self.folder / "notes.png"], self.ORB)
+        self.assertIn("could be compared", str(caught.exception))
+
+    def test_tool_shows_the_best_pair_and_the_ranking(self) -> None:
+        document = ImageDocument()
+        document.load(self.folder / "astronaut_1.png")
+        tool = ImageLookupTool()
+        tool._ask_params = lambda _parent, _path: None
+        self.assertIsNone(tool.run(None, document))
+        paths = tuple(list_images(self.folder, document.path))
+        tool._ask_params = lambda _parent, _path: LookupRequest(
+            self.folder, paths, self.ORB, "ransac"
+        )
+        result = tool.run(None, document)
+        self.assertEqual(result.details["Best"], "astronaut_2.jpg")
+        self.assertTrue(result.details["Rank 1"].startswith("astronaut_2.jpg:"))
+        self.assertIn("notes.png", result.details["Skipped"])
+        self.assertTrue(result.message.startswith("Closest image: astronaut_2.jpg"))
+        document.apply(result.image, tool.tool_id)
+        self.assertFalse(tool.is_available(document))
 
 
 if __name__ == "__main__":

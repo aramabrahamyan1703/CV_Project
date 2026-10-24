@@ -14,14 +14,22 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 import tkinter as tk
-from tkinter import ttk
+from tkinter import filedialog, ttk
 from typing import Generic, TypeVar
+
+from PIL import Image, ImageTk
 
 T = TypeVar("T")
 
 INTRO_WRAP = 380
 FOOTER_WRAP = 250
+
+IMAGE_TYPES = [
+    ("Image files", "*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp"),
+    ("All files", "*.*"),
+]
 
 
 @dataclass(frozen=True)
@@ -116,7 +124,9 @@ class ParamDialog(Generic[T]):
     def int_fields(self, frame: ttk.Frame, fields: tuple[IntField, ...]) -> list[tk.StringVar]:
         """One row per field: label, spin box, hint. Edits refresh the footer."""
         variables = []
-        for row, field in enumerate(fields):
+        start = frame.grid_size()[1]  # below anything already in the frame
+        for offset, field in enumerate(fields):
+            row = start + offset
             pady = (0, 0) if row == 0 else (8, 0)
             ttk.Label(frame, text=field.label).grid(row=row, column=0, sticky="w", pady=pady)
             variable = tk.StringVar(value=str(field.default))
@@ -138,6 +148,20 @@ class ParamDialog(Generic[T]):
                 self._focus = spinbox
             variables.append(variable)
         return variables
+
+    def checkbox(self, frame: ttk.Frame, text: str, *, default: bool, hint: str) -> tk.BooleanVar:
+        """A checkbox row below the frame's existing rows. Toggling refreshes the footer."""
+        row = frame.grid_size()[1]
+        pady = (0, 0) if row == 0 else (8, 0)
+        variable = tk.BooleanVar(value=default)
+        ttk.Checkbutton(frame, text=text, variable=variable).grid(
+            row=row, column=0, columnspan=2, sticky="w", pady=pady
+        )
+        ttk.Label(frame, text=hint, style="Hint.TLabel").grid(
+            row=row, column=2, sticky="w", padx=(10, 0), pady=pady
+        )
+        variable.trace_add("write", lambda *_args: self.refresh())
+        return variable
 
     def refresh(self) -> None:
         """Re-run validation: show the readout and enable the action, or the reason not to."""
@@ -186,3 +210,134 @@ class ParamDialog(Generic[T]):
     def _cancel(self) -> None:
         self._result = None
         self.top.destroy()
+
+
+class ImageChooser:
+    """A thumbnail, file name and size, and a "Choose image…" button in one section."""
+
+    THUMB_W = 76
+    THUMB_H = 96
+
+    def __init__(
+        self,
+        dialog: ParamDialog,
+        frame: ttk.Frame,
+        *,
+        prompt: str,
+        empty_hint: str,
+        initial: Path | None = None,
+    ) -> None:
+        self._dialog = dialog
+        self._prompt = prompt
+        self._empty_hint = empty_hint
+        self.path: Path | None = None
+        self.image: Image.Image | None = None
+        self._error: str | None = None
+        self._thumb: ImageTk.PhotoImage | None = None  # kept alive for Tk
+
+        box = ttk.Frame(frame, style="Preview.TFrame", width=self.THUMB_W, height=self.THUMB_H)
+        box.grid(row=0, column=0, rowspan=3, sticky="nw")
+        box.grid_propagate(False)
+        box.columnconfigure(0, weight=1)
+        box.rowconfigure(0, weight=1)
+        self._preview = ttk.Label(box, style="Preview.TLabel", text="No\nimage")
+        self._preview.grid(row=0, column=0)
+
+        self._name = ttk.Label(frame, style="Strong.TLabel", text="No image chosen")
+        self._name.grid(row=0, column=1, sticky="sw", padx=(14, 0))
+        self._info = ttk.Label(frame, style="Hint.TLabel", text=empty_hint, justify="left")
+        self._info.grid(row=1, column=1, sticky="nw", padx=(14, 0), pady=(2, 0))
+        frame.rowconfigure(1, weight=1)
+        ttk.Button(frame, text="Choose image…", command=self._choose).grid(
+            row=2, column=1, sticky="sw", padx=(14, 0)
+        )
+        if initial is not None and initial.exists():
+            self.load(initial)
+
+    def load(self, path: Path) -> None:
+        """Open ``path``, show its thumbnail and size, and refresh the dialog."""
+        self.path = path
+        self._name.configure(text=path.name)
+        try:
+            with Image.open(path) as opened:
+                image = opened.convert("RGB")
+        except OSError:
+            self.image, self._error = None, f"Cannot open {path.name} as an image."
+            self._info.configure(text="Not a readable image file.")
+            self._preview.configure(image="", text="No\nimage")
+        else:
+            self.image, self._error = image, None
+            shown = image.copy()
+            shown.thumbnail((self.THUMB_W - 8, self.THUMB_H - 8), Image.Resampling.LANCZOS)
+            self._thumb = ImageTk.PhotoImage(shown, master=self._dialog.top)
+            self._preview.configure(image=self._thumb, text="")
+            self._info.configure(text=f"{image.width} × {image.height} px")
+        self._dialog.refresh()
+
+    def require(self) -> tuple[Path, Image.Image]:
+        """The chosen path and image, or ``ValueError`` saying what is missing."""
+        if self._error:
+            raise ValueError(self._error)
+        if self.path is None or self.image is None:
+            raise ValueError(self._prompt)
+        return self.path, self.image
+
+    def _choose(self) -> None:
+        chosen = filedialog.askopenfilename(
+            parent=self._dialog.top,
+            title=self._prompt,
+            filetypes=IMAGE_TYPES,
+            initialdir=str(self.path.parent) if self.path else None,
+        )
+        if chosen:
+            self.load(Path(chosen))
+
+
+class FolderChooser:
+    """A folder name, a line describing its contents, and a "Choose folder…" button."""
+
+    def __init__(
+        self,
+        dialog: ParamDialog,
+        frame: ttk.Frame,
+        *,
+        prompt: str,
+        describe: Callable[[Path], str],
+        initial: Path | None = None,
+    ) -> None:
+        self._dialog = dialog
+        self._prompt = prompt
+        self._describe = describe
+        self.folder: Path | None = None
+
+        self._name = ttk.Label(frame, style="Strong.TLabel", text="No folder chosen")
+        self._name.grid(row=0, column=0, sticky="w")
+        self._info = ttk.Label(frame, style="Hint.TLabel", text="", justify="left")
+        self._info.grid(row=1, column=0, sticky="w", pady=(2, 0))
+        ttk.Button(frame, text="Choose folder…", command=self._choose).grid(
+            row=0, column=1, rowspan=2, sticky="e", padx=(14, 0)
+        )
+        frame.columnconfigure(0, weight=1)
+        if initial is not None and initial.is_dir():
+            self.load(initial)
+
+    def load(self, folder: Path) -> None:
+        self.folder = folder
+        self._name.configure(text=folder.name or str(folder))
+        self._info.configure(text=self._describe(folder))
+        self._dialog.refresh()
+
+    def require(self) -> Path:
+        if self.folder is None:
+            raise ValueError(self._prompt)
+        return self.folder
+
+    def _choose(self) -> None:
+        chosen = filedialog.askdirectory(
+            parent=self._dialog.top,
+            title=self._prompt,
+            initialdir=str(self.folder) if self.folder else None,
+            mustexist=True,
+        )
+        if chosen:
+            self.load(Path(chosen))

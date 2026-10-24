@@ -6,6 +6,7 @@ must be configurable; keypoints drawn as hollow red circles.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 import tkinter as tk
 from tkinter import messagebox, ttk
@@ -97,7 +98,14 @@ def extract_descriptors(
             n_octaves=n_octaves, n_scales=n_scales, sigma_min=sigma_min
         )
 
-    detector.detect_and_extract(gray)
+    try:
+        detector.detect_and_extract(gray)
+    except RuntimeError:
+        # skimage raises when it finds nothing at all (flat or low-contrast images).
+        raise ValueError(
+            f"No keypoints found with {method.upper()}.\n\n"
+            "Try a more textured image, or a different detector."
+        ) from None
     keypoints = np.asarray(detector.keypoints)
     descriptors = np.asarray(detector.descriptors)
     if keypoints.size == 0:
@@ -106,6 +114,47 @@ def extract_descriptors(
             "Try a more textured image, or a different detector."
         )
     return keypoints, descriptors
+
+
+def metric_for(method: str) -> str:
+    """``match_descriptors`` metric: ORB descriptors are bits, SIFT ones are numbers."""
+    return "hamming" if method.strip().lower() == "orb" else "euclidean"
+
+
+def descriptor_section(dialog: ParamDialog) -> Callable[[], tuple[DescriptorParams, str]]:
+    """Add the ORB/SIFT choice and both field groups to ``dialog``.
+
+    Returns a reader for use inside the dialog's ``validate``: it parses the
+    active method's fields and gives ``(params, readout)``, or raises
+    ``ValueError`` naming the bad field.
+    """
+    method_frame = dialog.section("Detector")
+    method_var = tk.StringVar(value="orb")
+    ttk.Radiobutton(method_frame, text="ORB", variable=method_var, value="orb").grid(
+        row=0, column=0, sticky="w"
+    )
+    ttk.Radiobutton(method_frame, text="SIFT", variable=method_var, value="sift").grid(
+        row=0, column=1, sticky="w", padx=(16, 0)
+    )
+    # Both groups stay visible; only the chosen method's fields are read.
+    orb_vars = dialog.int_fields(dialog.section("ORB (n_keypoints)"), ORB_FIELDS)
+    sift_vars = dialog.int_fields(
+        dialog.section("SIFT (n_octaves, n_scales, sigma_min)"), SIFT_FIELDS
+    )
+    method_var.trace_add("write", lambda *_args: dialog.refresh())
+
+    def read() -> tuple[DescriptorParams, str]:
+        if method_var.get() == "orb":
+            params = parse_descriptor_params("orb", orb_vars[0].get())
+            return params, f"ORB · n_keypoints={params.n_keypoints}"
+        params = parse_descriptor_params("sift", *(v.get() for v in sift_vars))
+        return (
+            params,
+            f"SIFT · octaves={params.n_octaves} · scales={params.n_scales} · "
+            f"sigma_min={params.sigma_min:g}",
+        )
+
+    return read
 
 
 def render_keypoints(image: Image.Image, keypoints: np.ndarray) -> Image.Image:
@@ -191,39 +240,5 @@ class DescriptorTool(ForensicsTool):
             "Parameters highlighted on the slide are configurable.",
             action="Extract",
         )
-        method_frame = dialog.section("Detector")
-        method_var = tk.StringVar(value="orb")
-        ttk.Radiobutton(method_frame, text="ORB", variable=method_var, value="orb").grid(
-            row=0, column=0, sticky="w"
-        )
-        ttk.Radiobutton(method_frame, text="SIFT", variable=method_var, value="sift").grid(
-            row=0, column=1, sticky="w", padx=(16, 0)
-        )
-
-        # Both field groups are laid out; visibility follows the chosen method.
-        orb_frame = dialog.section("ORB (n_keypoints)")
-        orb_vars = dialog.int_fields(orb_frame, ORB_FIELDS)
-        sift_frame = dialog.section("SIFT (n_octaves, n_scales, sigma_min)")
-        sift_vars = dialog.int_fields(sift_frame, SIFT_FIELDS)
-
-        def _sync_sections(*_args: object) -> None:
-            # Show both sections always (ParamDialog has no hide API); validation
-            # only reads the active method's fields.
-            dialog.refresh()
-
-        method_var.trace_add("write", _sync_sections)
-
-        def validate() -> tuple[DescriptorParams, str]:
-            if method_var.get().strip().lower() == "orb":
-                params = parse_descriptor_params("orb", orb_vars[0].get())
-                return params, f"ORB · n_keypoints={params.n_keypoints}"
-            params = parse_descriptor_params(
-                "sift", *(v.get() for v in sift_vars)
-            )
-            return (
-                params,
-                f"SIFT · octaves={params.n_octaves} · scales={params.n_scales} · "
-                f"sigma_min={params.sigma_min:g}",
-            )
-
-        return dialog.show(validate)
+        read_detector = descriptor_section(dialog)
+        return dialog.show(read_detector)
