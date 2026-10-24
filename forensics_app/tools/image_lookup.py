@@ -1,9 +1,13 @@
 """Find the image in a folder that best matches the working image (Set 5.4).
 
-The slide's minimum is "return the image with the maximum number of matches".
-The default ranking goes one step further: RANSAC keeps only the matches that
-agree on one perspective transform between the two images, so accidental
-matches on repeated texture (windows, tiles, text) stop counting.
+The slide's algorithm, "return the image with the maximum number of matches",
+is the default: with SIFT and a 0.8 ratio test it found the right image for
+7 of 7 references among the course's Set 5 images. A RANSAC ranking is
+offered as an alternative: it counts only the matches that agree on one
+affine transform (shift, rotation, scale, shear) between the two images. It
+did not beat plain counting there (6/7), because photos of 3D buildings from
+different spots do not follow one transform; it can help with flat subjects
+such as logos and signs on busy, repetitive backgrounds.
 """
 
 from __future__ import annotations
@@ -21,42 +25,45 @@ from skimage import measure, transform
 
 from forensics_app.core import ImageDocument
 from .base import ForensicsTool, ToolResult
-from .descriptors import ACCEPTED_MODES, descriptor_section
+from .descriptors import ACCEPTED_MODES
 from .matching import (
-    MATCH_FIELDS,
     MatchParams,
     closest,
     extract,
     match_features,
+    matching_sections,
     matching_summary,
     parse_matching_params,
     render_matches,
+    to_work_size,
 )
 from .param_dialog import FolderChooser, ParamDialog
 
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
 
-# Every image (and the reference) is shrunk to at most this many pixels on its
-# longest side before extraction: SIFT on a 1024 px photo finds ~17,000
-# keypoints and takes ~4 s, at 640 px ~3,000 and ~0.6 s.
-MAX_SIDE = 640
-# Measured seconds per folder image at MAX_SIDE, including matching.
-SECONDS_PER_IMAGE = {"orb": 0.4, "sift": 0.8}
+# Every image and the reference are resized to matching.WORK_SIDE first.
+# Measured seconds per folder image at that size, including matching.
+SECONDS_PER_IMAGE = {"orb": 0.4, "sift": 1.1}
 MAX_SECONDS = 120
 
 RANKINGS = {
-    "ransac": "Consistent matches (RANSAC)",
     "matches": "Most matches",
+    "ransac": "Consistent matches (RANSAC)",
 }
-# A perspective transform needs 4 point pairs; RANSAC is skipped below that.
-MIN_RANSAC_MATCHES = 4
+# An affine transform needs 3 point pairs; RANSAC is skipped below that.
+MIN_RANSAC_MATCHES = 3
+
+# Every keypoint is circled, as on the slide, only up to this many per image:
+# SIFT finds ~3,000 in a 640 px photo and the circles would hide it. Above
+# that, only the matched keypoints are circled.
+MAX_KEYPOINTS_DRAWN = 600
 
 
 @dataclass(frozen=True)
 class Candidate:
     path: Path
-    image: Image.Image  # shrunk, as compared
+    image: Image.Image  # at the working size, as compared
     keypoints: np.ndarray
     matches: np.ndarray
     distances: np.ndarray
@@ -73,7 +80,7 @@ class Candidate:
 
 @dataclass(frozen=True)
 class LookupResult:
-    reference: Image.Image  # shrunk, as compared
+    reference: Image.Image  # at the working size, as compared
     reference_keypoints: np.ndarray
     ranked: tuple[Candidate, ...]  # best first
     skipped: tuple[tuple[str, str], ...]  # (file name, reason)
@@ -95,20 +102,13 @@ def estimate_seconds(count: int, method: str) -> float:
     return count * SECONDS_PER_IMAGE[method]
 
 
-def shrink(image: Image.Image) -> Image.Image:
-    """A copy no larger than MAX_SIDE on its longest side; never enlarged."""
-    small = image.convert("RGB") if image.mode not in ("L", "RGB") else image.copy()
-    small.thumbnail((MAX_SIDE, MAX_SIDE), Image.Resampling.LANCZOS)
-    return small
-
-
 def consistent_matches(
     keypoints1: np.ndarray,
     keypoints2: np.ndarray,
     matches: np.ndarray,
     size2: tuple[int, int],
 ) -> np.ndarray:
-    """Which matches fit one perspective transform, by RANSAC; all False if none can.
+    """Which matches fit one affine transform, by RANSAC; all False if none can.
 
     The tolerance is 1% of the second image's diagonal (at least 3 px), and
     the random generator is seeded so the same input always ranks the same.
@@ -124,7 +124,7 @@ def consistent_matches(
         warnings.simplefilter("ignore")  # degenerate samples warn, then get skipped
         model, found = measure.ransac(
             (source, target),
-            transform.ProjectiveTransform,
+            transform.AffineTransform,
             min_samples=MIN_RANSAC_MATCHES,
             residual_threshold=tolerance,
             max_trials=500,
@@ -139,7 +139,7 @@ def find_closest_image(
     reference: Image.Image,
     paths: list[Path],
     params: MatchParams,
-    ranking: str = "ransac",
+    ranking: str = "matches",
 ) -> LookupResult:
     """Compare ``reference`` with every image in ``paths`` and rank them, best first.
 
@@ -150,7 +150,7 @@ def find_closest_image(
         raise ValueError(f"Ranking must be one of {', '.join(RANKINGS)}.")
     if not paths:
         raise ValueError("The folder has no images to compare with.")
-    small_reference = shrink(reference)
+    small_reference = to_work_size(reference)
     ref_keypoints, ref_descriptors = extract(small_reference, params.detector)
 
     candidates: list[Candidate] = []
@@ -158,7 +158,7 @@ def find_closest_image(
     for path in paths:
         try:
             with Image.open(path) as opened:
-                image = shrink(opened)
+                image = to_work_size(opened)
         except OSError:
             skipped.append((path.name, "not a readable image"))
             continue
@@ -263,7 +263,8 @@ class ImageLookupTool(ForensicsTool):
             best.keypoints,
             drawn,
             title=f"Reference: {reference_name}  <--->  Best: {best.path.name}  ({counts})",
-            all_keypoints=True,
+            all_keypoints=max(len(lookup.reference_keypoints), len(best.keypoints))
+            <= MAX_KEYPOINTS_DRAWN,
             keypoints_color="r",
         )
 
@@ -317,23 +318,21 @@ class ImageLookupTool(ForensicsTool):
             describe=describe,
             initial=self._last_folder,
         )
-        read_detector = descriptor_section(dialog)
-        frame = dialog.section("Matching")
-        cross_check = dialog.checkbox(
-            frame, "Cross-check", default=True, hint="keep only mutual best matches"
+        # SIFT: right 7/7 times on the Set 5 images, ORB 5/7 (see matching.py).
+        read_detector, cross_check, ratio_var, lines_var = matching_sections(
+            dialog, method="sift"
         )
-        ratio_var, lines_var = dialog.int_fields(frame, MATCH_FIELDS)
 
         ranking_frame = dialog.section("Ranking")
-        ranking_var = tk.StringVar(value="ransac")
+        ranking_var = tk.StringVar(value="matches")
         for row, (value, label) in enumerate(RANKINGS.items()):
             ttk.Radiobutton(ranking_frame, text=label, variable=ranking_var, value=value).grid(
                 row=row, column=0, sticky="w", pady=(0, 0) if row == 0 else (6, 0)
             )
         ttk.Label(
             ranking_frame,
-            text="RANSAC counts only the matches that agree on\n"
-            "one perspective view of the same scene.",
+            text="RANSAC counts only matches that agree on one\n"
+            "shift, rotation and scale: best for flat subjects.",
             style="Hint.TLabel",
             justify="left",
         ).grid(row=len(RANKINGS), column=0, sticky="w", pady=(6, 0))

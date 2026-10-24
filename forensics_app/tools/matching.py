@@ -8,6 +8,7 @@ descriptors, Euclidean for SIFT's numeric ones.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 import io
 from pathlib import Path
@@ -34,9 +35,25 @@ from .param_dialog import ImageChooser, IntField, ParamDialog, parse_int_fields
 
 
 MATCH_FIELDS = (
-    IntField("Max ratio ×100", 80, 100, "Lowe's ratio test; 100 = off"),
+    IntField("Max ratio ×100", 90, 100, "Lowe's ratio test; 100 = off"),
     IntField("Lines drawn", 50, 1000, "closest matches drawn; 0 = all", minimum=0),
 )
+
+# Defaults measured on the course's Set 5 images: each of 7 references was
+# looked up among the other 18 images, counting how often the top result came
+# from the right group. ORB was right 5/7 times with ratio 0.9 but 3/7 with
+# 0.8 or with no ratio test (cross-check alone keeps many random ORB pairs);
+# SIFT was right 7/7 with 0.8 and 3/7 without. The dialog switches the ratio
+# with the detector. 500 ORB keypoints give about twice the consistent matches
+# of the slide's 200.
+RATIO_DEFAULTS = {"orb": 90, "sift": 80}
+ORB_MATCH_KEYPOINTS = 500
+
+# Both images are resized so their longest side is WORK_SIDE before matching:
+# the same scale for both (ORB's pyramid covers only ~3.6× of size difference,
+# and the Set 5 pairs differ by up to 4×), equal size side by side, and
+# SIFT in about a second instead of minutes on a 3000 px photo.
+WORK_SIDE = 640
 
 # Rendered sheet width in pixels: small pairs are enlarged, big ones reduced.
 MIN_SHEET_W = 1000
@@ -47,7 +64,7 @@ MAX_SHEET_W = 2400
 class MatchParams:
     detector: DescriptorParams
     cross_check: bool = True
-    max_ratio: float = 0.8
+    max_ratio: float = 0.9
     lines: int = 50  # 0 draws every match
 
 
@@ -73,6 +90,14 @@ def matching_summary(params: MatchParams) -> str:
     cross = "cross-check" if params.cross_check else "no cross-check"
     ratio = "no ratio test" if params.max_ratio >= 1 else f"ratio {params.max_ratio:.2f}"
     return f"{metric_for(params.detector.method)} · {cross} · {ratio}"
+
+
+def to_work_size(image: Image.Image) -> Image.Image:
+    """``image`` resized (up or down) so its longest side is WORK_SIDE, in L or RGB."""
+    work = image if image.mode in ("L", "RGB") else image.convert("RGB")
+    scale = WORK_SIDE / max(work.size)
+    size = (max(1, round(work.width * scale)), max(1, round(work.height * scale)))
+    return work.resize(size, Image.Resampling.LANCZOS)
 
 
 def extract(image: Image.Image, detector: DescriptorParams) -> tuple[np.ndarray, np.ndarray]:
@@ -180,6 +205,32 @@ def render_matches(
         return rendered.convert("RGB")
 
 
+def matching_sections(
+    dialog: ParamDialog, *, method: str = "orb"
+) -> tuple[Callable[[], tuple[DescriptorParams, str]], tk.BooleanVar, tk.StringVar, tk.StringVar]:
+    """Detector and matching sections shared by 5.3 and 5.4, starting on ``method``.
+
+    "Max ratio" starts at, and follows, the chosen detector's default.
+    """
+    ratio: list[tk.StringVar] = []  # filled below; the detector section needs it first
+
+    def detector_changed(method: str) -> None:
+        if ratio:
+            ratio[0].set(str(RATIO_DEFAULTS[method]))
+
+    read_detector = descriptor_section(
+        dialog, method=method, orb_keypoints=ORB_MATCH_KEYPOINTS, on_method=detector_changed
+    )
+    frame = dialog.section("Matching")
+    cross_check = dialog.checkbox(
+        frame, "Cross-check", default=True, hint="keep only mutual best matches"
+    )
+    ratio_var, lines_var = dialog.int_fields(frame, MATCH_FIELDS)
+    ratio_var.set(str(RATIO_DEFAULTS[method]))
+    ratio.append(ratio_var)
+    return read_detector, cross_check, ratio_var, lines_var
+
+
 @dataclass(frozen=True)
 class MatchingRequest:
     second_path: Path
@@ -228,8 +279,9 @@ class FeatureMatchingTool(ForensicsTool):
             return None
         params = request.params
 
+        first, second = to_work_size(source), to_work_size(request.second)
         try:
-            result = match_images(source, request.second, params)
+            result = match_images(first, second, params)
         except ValueError as error:
             messagebox.showinfo(self.title, str(error), parent=parent)
             return None
@@ -238,8 +290,8 @@ class FeatureMatchingTool(ForensicsTool):
         drawn = closest(result.matches, result.distances, params.lines)
         shown = "all drawn" if len(drawn) == count else f"{len(drawn)} closest drawn"
         sheet = render_matches(
-            source,
-            request.second,
+            first,
+            second,
             result.keypoints1,
             result.keypoints2,
             drawn,
@@ -266,6 +318,7 @@ class FeatureMatchingTool(ForensicsTool):
                 "Metric": result.metric,
                 "Cross-check": "yes" if params.cross_check else "no",
                 "Max ratio": f"{params.max_ratio:.2f}",
+                "Compared at": f"{first.width}×{first.height} / {second.width}×{second.height}",
                 "Keypoints (this / second)": (
                     f"{len(result.keypoints1)} / {len(result.keypoints2)}"
                 ),
@@ -301,12 +354,7 @@ class FeatureMatchingTool(ForensicsTool):
             empty_hint="The same scene or object,\nseen differently.",
             initial=self._last_second,
         )
-        read_detector = descriptor_section(dialog)
-        frame = dialog.section("Matching")
-        cross_check = dialog.checkbox(
-            frame, "Cross-check", default=True, hint="keep only mutual best matches"
-        )
-        ratio_var, lines_var = dialog.int_fields(frame, MATCH_FIELDS)
+        read_detector, cross_check, ratio_var, lines_var = matching_sections(dialog)
 
         def validate() -> tuple[MatchingRequest, str]:
             path, second = chooser.require()

@@ -7,7 +7,7 @@ must be configurable; keypoints drawn as hollow red circles.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import tkinter as tk
 from tkinter import messagebox, ttk
 
@@ -24,7 +24,7 @@ ACCEPTED_MODES = ("L", "RGB", "RGBA", "P")
 METHODS = ("orb", "sift")
 
 ORB_FIELDS = (
-    IntField("Keypoints", 200, 500, "ORB n_keypoints", minimum=1),
+    IntField("Keypoints", 200, 2000, "ORB n_keypoints", minimum=1),
 )
 SIFT_FIELDS = (
     IntField("Octaves", 8, 12, "SIFT n_octaves", minimum=1),
@@ -121,15 +121,24 @@ def metric_for(method: str) -> str:
     return "hamming" if method.strip().lower() == "orb" else "euclidean"
 
 
-def descriptor_section(dialog: ParamDialog) -> Callable[[], tuple[DescriptorParams, str]]:
+def descriptor_section(
+    dialog: ParamDialog,
+    *,
+    method: str = "orb",
+    orb_keypoints: int | None = None,
+    on_method: Callable[[str], None] | None = None,
+) -> Callable[[], tuple[DescriptorParams, str]]:
     """Add the ORB/SIFT choice and both field groups to ``dialog``.
 
-    Returns a reader for use inside the dialog's ``validate``: it parses the
-    active method's fields and gives ``(params, readout)``, or raises
-    ``ValueError`` naming the bad field.
+    ``method`` is the detector chosen at first; ``orb_keypoints`` overrides
+    the slide's default of 200; ``on_method`` is
+    called with ``"orb"`` or ``"sift"`` whenever the choice changes. Returns a
+    reader for use inside the dialog's ``validate``: it parses the active
+    method's fields and gives ``(params, readout)``, or raises ``ValueError``
+    naming the bad field.
     """
     method_frame = dialog.section("Detector")
-    method_var = tk.StringVar(value="orb")
+    method_var = tk.StringVar(value=method)
     ttk.Radiobutton(method_frame, text="ORB", variable=method_var, value="orb").grid(
         row=0, column=0, sticky="w"
     )
@@ -137,11 +146,20 @@ def descriptor_section(dialog: ParamDialog) -> Callable[[], tuple[DescriptorPara
         row=0, column=1, sticky="w", padx=(16, 0)
     )
     # Both groups stay visible; only the chosen method's fields are read.
-    orb_vars = dialog.int_fields(dialog.section("ORB (n_keypoints)"), ORB_FIELDS)
+    orb_fields = ORB_FIELDS
+    if orb_keypoints is not None:
+        orb_fields = (replace(ORB_FIELDS[0], default=orb_keypoints),)
+    orb_vars = dialog.int_fields(dialog.section("ORB (n_keypoints)"), orb_fields)
     sift_vars = dialog.int_fields(
         dialog.section("SIFT (n_octaves, n_scales, sigma_min)"), SIFT_FIELDS
     )
-    method_var.trace_add("write", lambda *_args: dialog.refresh())
+
+    def method_changed(*_args: object) -> None:
+        if on_method is not None:
+            on_method(method_var.get())
+        dialog.refresh()
+
+    method_var.trace_add("write", method_changed)
 
     def read() -> tuple[DescriptorParams, str]:
         if method_var.get() == "orb":

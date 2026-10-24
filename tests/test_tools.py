@@ -68,7 +68,6 @@ from forensics_app.tools.image_lookup import (
     consistent_matches,
     find_closest_image,
     list_images,
-    shrink,
 )
 from forensics_app.tools.matching import (
     FeatureMatchingTool,
@@ -78,6 +77,7 @@ from forensics_app.tools.matching import (
     match_images,
     matching_summary,
     parse_matching_params,
+    to_work_size,
 )
 
 
@@ -1505,13 +1505,14 @@ class ImageLookupTests(unittest.TestCase):
         paths = [self.folder / "astronaut_2.jpg"]
         best = find_closest_image(_astronaut(), paths, self.ORB).ranked[0]
         self.assertGreater(best.consistent_count, 0.8 * best.match_count)
-        few = np.array([[0, 0], [1, 1], [2, 2]])
-        keypoints = np.array([[1.0, 1.0], [5.0, 9.0], [20.0, 3.0]])
+        few = np.array([[0, 0], [1, 1]])  # an affine transform needs 3 pairs
+        keypoints = np.array([[1.0, 1.0], [5.0, 9.0]])
         self.assertFalse(consistent_matches(keypoints, keypoints, few, (40, 40)).any())
 
-    def test_large_images_are_shrunk_and_small_ones_kept(self) -> None:
-        self.assertEqual(shrink(Image.new("RGB", (1600, 1200))).size, (640, 480))
-        self.assertEqual(shrink(Image.new("L", (300, 200))).size, (300, 200))
+    def test_images_are_compared_at_one_working_size(self) -> None:
+        self.assertEqual(to_work_size(Image.new("RGB", (1600, 1200))).size, (640, 480))
+        self.assertEqual(to_work_size(Image.new("L", (300, 200))).size, (640, 427))
+        self.assertEqual(to_work_size(Image.new("RGBA", (200, 400))).mode, "RGB")
 
     def test_an_empty_or_unreadable_folder_is_reported(self) -> None:
         with self.assertRaises(ValueError):
