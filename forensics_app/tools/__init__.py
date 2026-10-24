@@ -18,8 +18,12 @@ from .skimage_filters import (
     UnsharpMaskTool,
 )
 from .canny import CannyEdgeTool
+from .ncc import NCCTool
+from .template_matching import TemplateMatchingTool
 from .hog import HOGTool
 from .hog_detection import HOGPersonDetectionTool
+from .corners import CornerDetectionTool
+from .descriptors import DescriptorTool
 
 
 def build_tool_registry() -> ToolRegistry:
@@ -40,8 +44,12 @@ def build_tool_registry() -> ToolRegistry:
             SobelFilterTool(),
             UnsharpMaskTool(),
             CannyEdgeTool(),
+            NCCTool(),
+            TemplateMatchingTool(),
             HOGTool(),
             HOGPersonDetectionTool(),
+            CornerDetectionTool(),
+            DescriptorTool(),
         ]
     )
 
