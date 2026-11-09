@@ -4,5 +4,5 @@ matplotlib>=3.7
 scikit-image>=0.22
 # YuNet face detection (cv2.FaceDetectorYN); the 2023mar model needs 4.8+.
 opencv-python>=4.8
-# Only scripts/export_lfw.py needs it, to download the LFW faces.
+# BoW codebook (Set 7) and scripts/export_lfw.py (LFW download).
 scikit-learn>=1.3
