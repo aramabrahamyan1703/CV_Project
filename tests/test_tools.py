@@ -63,6 +63,19 @@ from forensics_app.tools.descriptors import (
     parse_descriptor_params,
     render_keypoints,
 )
+from forensics_app.tools.bow import (
+    WORDS_PER_CLASS,
+    BowClassifyTool,
+    BowHistogramTool,
+    CodebookTool,
+    build_codebook,
+    classify_image,
+    clear_model,
+    get_model,
+    histogram_for_image,
+    list_class_folders,
+    render_visual_words,
+)
 from forensics_app.tools.image_lookup import (
     ImageLookupTool,
     LookupRequest,
@@ -1626,6 +1639,114 @@ class ImageLookupTests(unittest.TestCase):
         self.assertTrue(result.details["Confidence"].startswith("clear"))
         document.apply(result.image, tool.tool_id)
         self.assertFalse(tool.is_available(document))
+
+
+class BowTests(unittest.TestCase):
+    """Set 7 bag-of-visual-words on a tiny two-class folder of textured images."""
+
+    DETECTOR = DescriptorParams(method="orb", n_keypoints=40)
+
+    @staticmethod
+    def _textured(seed: int, label: str) -> Image.Image:
+        rng = np.random.default_rng(seed)
+        base = rng.integers(40, 220, (96, 96), dtype=np.uint8)
+        image = Image.fromarray(base, mode="L").convert("RGB")
+        draw = ImageDraw.Draw(image)
+        # Class-specific strokes so histograms diverge a little.
+        if label == "alpha":
+            for i in range(0, 96, 8):
+                draw.line((i, 0, i, 95), fill=(20, 20, 20), width=2)
+        else:
+            for i in range(0, 96, 8):
+                draw.line((0, i, 95, i), fill=(20, 20, 20), width=2)
+        draw.text((8, 40), label[:3].upper(), fill=(255, 255, 255))
+        return image
+
+    def setUp(self) -> None:
+        clear_model()
+        self._tmp = TemporaryDirectory()
+        root = Path(self._tmp.name)
+        for name, seeds in (("alpha", (1, 2, 3, 4)), ("beta", (11, 12, 13, 14))):
+            folder = root / name
+            folder.mkdir()
+            for seed in seeds:
+                self._textured(seed, name).save(folder / f"{name}_{seed}.png")
+        self.root = root
+
+    def tearDown(self) -> None:
+        clear_model()
+        self._tmp.cleanup()
+
+    def test_list_class_folders_reads_subfolders(self) -> None:
+        classes = list_class_folders(self.root)
+        self.assertEqual([name for name, _ in classes], ["alpha", "beta"])
+        self.assertEqual(len(classes[0][1]), 4)
+
+    def test_list_rejects_a_folder_with_fewer_than_two_classes(self) -> None:
+        only = Path(self._tmp.name) / "only"
+        only.mkdir()
+        (only / "one").mkdir()
+        self._textured(0, "one").save(only / "one" / "a.png")
+        with self.assertRaises(ValueError) as caught:
+            list_class_folders(only)
+        self.assertIn("two class", str(caught.exception))
+
+    def test_build_codebook_uses_ten_words_per_class(self) -> None:
+        model = build_codebook(self.root, detector=self.DETECTOR, max_per_class=4)
+        self.assertEqual(model.codebook.size, WORDS_PER_CLASS * 2)
+        self.assertEqual(model.codebook.class_names, ("alpha", "beta"))
+        self.assertEqual(len(model.codebook.patches), model.codebook.size)
+        self.assertIs(get_model(), model)
+        self.assertGreaterEqual(model.train_accuracy, 0.5)
+
+    def test_histogram_is_normalized_and_length_k(self) -> None:
+        model = build_codebook(self.root, detector=self.DETECTOR, max_per_class=4)
+        hist = histogram_for_image(self._textured(99, "alpha"), model.codebook)
+        self.assertEqual(hist.shape, (model.codebook.size,))
+        self.assertAlmostEqual(float(hist.sum()), 1.0, places=5)
+
+    def test_classify_returns_a_known_class_and_probability(self) -> None:
+        model = build_codebook(self.root, detector=self.DETECTOR, max_per_class=4)
+        label, prob, probs, hist = classify_image(self._textured(2, "alpha"), model)
+        self.assertIn(label, model.codebook.class_names)
+        self.assertGreaterEqual(prob, 0.0)
+        self.assertLessEqual(prob, 1.0)
+        self.assertAlmostEqual(float(probs.sum()), 1.0, places=5)
+        self.assertEqual(hist.shape, (model.codebook.size,))
+
+    def test_render_visual_words_makes_an_rgb_sheet(self) -> None:
+        model = build_codebook(self.root, detector=self.DETECTOR, max_per_class=4)
+        sheet = render_visual_words(model.codebook.patches)
+        self.assertEqual(sheet.mode, "RGB")
+        self.assertGreater(sheet.width, 100)
+
+    def test_histogram_and_classify_tools_need_a_codebook(self) -> None:
+        document = ImageDocument()
+        document.current = self._textured(1, "alpha")
+        self.assertFalse(BowHistogramTool().is_available(document))
+        self.assertFalse(BowClassifyTool().is_available(document))
+        self.assertIn("codebook", BowHistogramTool().unavailable_message(document).lower())
+
+    def test_tools_run_after_codebook_and_cancel_returns_none(self) -> None:
+        build_codebook(self.root, detector=self.DETECTOR, max_per_class=4)
+        document = ImageDocument()
+        document.current = self._textured(12, "beta")
+
+        hist_tool = BowHistogramTool()
+        self.assertTrue(hist_tool.is_available(document))
+        result = hist_tool.run(None, document)
+        self.assertEqual(result.details["Codebook K"], WORDS_PER_CLASS * 2)
+        self.assertEqual(result.image.mode, "RGB")
+
+        clf = BowClassifyTool()
+        result = clf.run(None, document)
+        self.assertIn(result.details["Predicted"], ("alpha", "beta"))
+        self.assertTrue(result.message.startswith("p("))
+
+        codebook_tool = CodebookTool()
+        codebook_tool._ask_folder = lambda _parent: None
+        self.assertIsNone(codebook_tool.run(None, document))
+
 
 if __name__ == "__main__":
     unittest.main()

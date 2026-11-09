@@ -32,6 +32,7 @@ from .face_recognition import (
     FaceRecognitionTool,
     RecognitionAccuracyTool,
 )
+from .bow import BowClassifyTool, BowHistogramTool, CodebookTool
 
 
 def build_tool_registry() -> ToolRegistry:
@@ -65,6 +66,9 @@ def build_tool_registry() -> ToolRegistry:
             EigenfaceBuilderTool(),
             FaceRecognitionTool(),
             RecognitionAccuracyTool(),
+            CodebookTool(),
+            BowHistogramTool(),
+            BowClassifyTool(),
         ]
     )
 
