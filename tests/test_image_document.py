@@ -21,6 +21,17 @@ class ImageDocumentTests(unittest.TestCase):
         self.assertEqual(self.document.current.size, (8, 6))
         self.assertEqual(self.document.original.getpixel((0, 0)), (255, 0, 0))
 
+    def test_a_result_with_nothing_loaded_starts_a_new_document(self) -> None:
+        document = ImageDocument()
+        document.apply(Image.new("RGB", (4, 3), "green"), "webcam")
+        self.assertTrue(document.is_loaded)
+        self.assertIsNone(document.path)
+        self.assertEqual(document.history, ("webcam",))
+        self.assertFalse(document.can_undo)
+        document.apply(Image.new("RGB", (4, 3), "blue"), "grayscale")
+        self.assertTrue(document.reset())
+        self.assertEqual(document.current.getpixel((0, 0)), (0, 128, 0))
+
     def test_apply_undo_and_redo(self) -> None:
         self.document.apply(Image.new("RGB", (8, 6), "blue"))
         self.assertEqual(self.document.current.getpixel((0, 0)), (0, 0, 255))

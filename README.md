@@ -37,6 +37,33 @@ python -m unittest discover -s tests -v
 python -m compileall forensics_app
 ```
 
+## Face tools (Set 6): model and data
+
+These are not in the repository; set them up once.
+
+**YuNet face detector** (Face detection, Face detection (webcam)). Download
+`face_detection_yunet_2023mar.onnx` from the
+[OpenCV model zoo](https://huggingface.co/opencv/opencv_zoo/resolve/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx)
+into `models/`. The dialogs can also point at a copy anywhere else.
+
+**LFW faces** (Eigenface builder, Face recognition, Recognition accuracy):
+
+```
+python scripts/export_lfw.py
+```
+
+downloads Labeled Faces in the Wild with scikit-learn (about 200 MB, once) and
+writes the course notebook's split into `data/lfw/`: 966 train and 322 test
+faces of 7 people, one folder per person (`train/George_W_Bush/0003.png`), plus
+`labels.csv`. Build the model with *Eigenface builder* on `data/lfw/train`; it
+saves `data/lfw/eigenfaces_model.npz`, which the recognition tools load. Expect
+about 69% test accuracy with the defaults (100 eigenfaces, whitened distances;
+always answering the most common person scores 45%).
+
+**Webcam on macOS.** Allow camera access for the app you start ForensicsApp
+from (Terminal, iTerm, VS Code…) in System Settings → Privacy & Security →
+Camera, then restart that app.
+
 ## Course roadmap
 
 The shell is intentionally neutral about the algorithms. Possible tool modules  

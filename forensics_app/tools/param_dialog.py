@@ -341,3 +341,106 @@ class FolderChooser:
         )
         if chosen:
             self.load(Path(chosen))
+
+
+class ProgressWindow:
+    """A small modal window with a progress bar, a status line and Cancel.
+
+    For loops that would otherwise freeze the app: call :meth:`step` once per
+    item; it redraws the window, processes the Cancel click and returns False
+    once the user has cancelled. Always :meth:`close` it, e.g. in ``finally``.
+    """
+
+    def __init__(self, parent: tk.Misc, *, title: str, total: int) -> None:
+        self.cancelled = False
+        self.top = tk.Toplevel(parent)
+        self.top.title(title)
+        self.top.transient(parent)
+        self.top.resizable(False, False)
+        frame = ttk.Frame(self.top, padding=(20, 16, 20, 14))
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text=title, style="Heading.TLabel").pack(anchor="w")
+        self._status = ttk.Label(frame, text="Starting…", style="Hint.TLabel", width=46)
+        self._status.pack(anchor="w", pady=(4, 10))
+        self._bar = ttk.Progressbar(frame, length=340, maximum=max(total, 1))
+        self._bar.pack(fill="x")
+        ttk.Button(frame, text="Cancel", command=self._cancel).pack(anchor="e", pady=(12, 0))
+        self.top.protocol("WM_DELETE_WINDOW", self._cancel)
+        self.top.bind("<Escape>", lambda _event: self._cancel())
+        self.top.update_idletasks()
+        x = parent.winfo_rootx() + (parent.winfo_width() - self.top.winfo_reqwidth()) // 2
+        y = parent.winfo_rooty() + (parent.winfo_height() - self.top.winfo_reqheight()) // 3
+        self.top.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        self.top.grab_set()  # the rest of the app waits, but stays drawn
+        self.top.update()
+
+    def step(self, done: int, text: str) -> bool:
+        """Show ``done`` items finished and what is next; False once cancelled."""
+        if not self.cancelled:
+            self._bar.configure(value=done)
+            self._status.configure(text=text)
+            self.top.update()
+        return not self.cancelled
+
+    def close(self) -> None:
+        if self.top.winfo_exists():
+            self.top.grab_release()
+            self.top.destroy()
+
+    def _cancel(self) -> None:
+        self.cancelled = True
+        self._status.configure(text="Cancelling…")
+
+
+class FileChooser:
+    """A file name, a line describing it, and a "Choose file…" button."""
+
+    def __init__(
+        self,
+        dialog: ParamDialog,
+        frame: ttk.Frame,
+        *,
+        prompt: str,
+        filetypes: list[tuple[str, str]],
+        describe: Callable[[Path], str],
+        initial: Path | None = None,
+    ) -> None:
+        self._dialog = dialog
+        self._prompt = prompt
+        self._filetypes = filetypes
+        self._describe = describe
+        self.path: Path | None = None
+
+        self._name = ttk.Label(frame, style="Strong.TLabel", text="No file chosen")
+        self._name.grid(row=0, column=0, sticky="w")
+        self._info = ttk.Label(frame, style="Hint.TLabel", text="", justify="left")
+        self._info.grid(row=1, column=0, sticky="w", pady=(2, 0))
+        ttk.Button(frame, text="Choose file…", command=self._choose).grid(
+            row=0, column=1, rowspan=2, sticky="e", padx=(14, 0)
+        )
+        frame.columnconfigure(0, weight=1)
+        if initial is not None and initial.is_file():
+            self.load(initial)
+
+    def load(self, path: Path) -> None:
+        self.path = path
+        self._name.configure(text=path.name)
+        self._info.configure(text=self._describe(path))
+        self._dialog.refresh()
+
+    def require(self) -> Path:
+        if self.path is None:
+            raise ValueError(self._prompt)
+        if not self.path.is_file():
+            raise ValueError(f"{self.path.name} no longer exists.")
+        return self.path
+
+    def _choose(self) -> None:
+        chosen = filedialog.askopenfilename(
+            parent=self._dialog.top,
+            title=self._prompt,
+            filetypes=self._filetypes,
+            initialdir=str(self.path.parent) if self.path else None,
+        )
+        if chosen:
+            self.load(Path(chosen))

@@ -342,7 +342,10 @@ class MainWindow:
                     else "Tool.TButton",
                 )
         self._show_steps()
-        title = self.document.path.name if self.document.path else "No image"
+        if self.document.path is not None:
+            title = self.document.path.name
+        else:
+            title = "Untitled" if loaded else "No image"  # a tool's own result, unsaved
         self.root.title(f"ForensicsApp — {title}")
 
     def _show_steps(self) -> None:

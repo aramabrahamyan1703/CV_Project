@@ -2,3 +2,7 @@ Pillow>=10.0,<13
 numpy>=1.24
 matplotlib>=3.7
 scikit-image>=0.22
+# YuNet face detection (cv2.FaceDetectorYN); the 2023mar model needs 4.8+.
+opencv-python>=4.8
+# Only scripts/export_lfw.py needs it, to download the LFW faces.
+scikit-learn>=1.3

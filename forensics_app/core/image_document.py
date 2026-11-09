@@ -73,9 +73,20 @@ class ImageDocument:
         self._redo.clear()
 
     def apply(self, image: Image.Image, tool_id: str | None = None) -> None:
-        """Make ``image`` the working image, recording the tool that made it."""
+        """Make ``image`` the working image, recording the tool that made it.
+
+        With no image loaded, ``image`` starts a new, unsaved document: the
+        result of a tool that needs no input, such as a webcam capture or a
+        model's figure. It is then the original that Reset returns to.
+        """
         if self.current is None:
-            raise RuntimeError("Load an image before applying a result.")
+            self.path = None
+            self.original = image.copy()
+            self.current = image.copy()
+            self.last_tool_id = tool_id
+            self._undo.clear()
+            self._redo.clear()
+            return
         self._undo.append((self.current.copy(), self.last_tool_id))
         self.current = image.copy()
         self.last_tool_id = tool_id

@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -65,9 +66,13 @@ from forensics_app.tools.descriptors import (
 from forensics_app.tools.image_lookup import (
     ImageLookupTool,
     LookupRequest,
+    SearchCancelled,
     consistent_matches,
     find_closest_image,
+    fingerprint,
     list_images,
+    same_picture,
+    stand_out,
 )
 from forensics_app.tools.matching import (
     FeatureMatchingTool,
@@ -1473,37 +1478,103 @@ class ImageLookupTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = TemporaryDirectory()
         self.folder = Path(self._tmp.name)
-        reference = _astronaut()
-        reference.save(self.folder / "astronaut_1.png")
-        _rotated_view(reference).save(self.folder / "astronaut_2.jpg")
+        self.reference = _astronaut()
+        self.reference_path = self.folder / "astronaut_1.png"
+        self.reference.save(self.reference_path)
+        (self.folder / "views").mkdir()
+        _rotated_view(self.reference).save(self.folder / "views" / "astronaut_2.jpg")
         for name in ("coffee", "chelsea", "camera"):
             Image.fromarray(getattr(data, name)()).save(self.folder / f"{name}.png")
         (self.folder / "notes.png").write_text("not an image")
         (self.folder / "readme.txt").write_text("ignored: not an image extension")
-        (self.folder / "sub").mkdir()
-        reference.save(self.folder / "sub" / "copy.png")  # subfolders are not searched
+        # The same picture again, smaller and re-encoded: must never be "the closest".
+        (self.folder / "copies").mkdir()
+        self.reference.resize((300, 300)).save(self.folder / "copies" / "astronaut_copy.jpg")
+        # Hidden files and folders are not searched.
+        (self.folder / ".cache").mkdir()
+        self.reference.save(self.folder / ".cache" / "thumb.png")
+        (self.folder / "._astronaut_1.png").write_bytes(b"macOS metadata")
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
-    def test_lists_images_only_and_excludes_the_reference(self) -> None:
-        names = [p.name for p in list_images(self.folder, self.folder / "astronaut_1.png")]
+    def _names(self, paths: list[Path]) -> list[str]:
+        return [path.relative_to(self.folder).as_posix() for path in paths]
+
+    def test_lists_images_in_subfolders_without_hidden_files_or_the_reference(self) -> None:
         self.assertEqual(
-            names, ["astronaut_2.jpg", "camera.png", "chelsea.png", "coffee.png", "notes.png"]
+            self._names(list_images(self.folder, self.reference_path)),
+            [
+                "camera.png",
+                "chelsea.png",
+                "coffee.png",
+                "copies/astronaut_copy.jpg",
+                "notes.png",
+                "views/astronaut_2.jpg",
+            ],
         )
 
-    def test_the_other_view_wins_under_both_rankings(self) -> None:
-        paths = list_images(self.folder, self.folder / "astronaut_1.png")
+    def test_the_reference_file_is_excluded_however_it_is_named(self) -> None:
+        roundabout = self.folder / "views" / ".." / "astronaut_1.png"
+        self.assertNotIn("astronaut_1.png", self._names(list_images(self.folder, roundabout)))
+        os.link(self.reference_path, self.folder / "linked.png")  # same file, second name
+        self.assertNotIn("linked.png", self._names(list_images(self.folder, self.reference_path)))
+
+    def test_same_picture_ignores_size_and_format_but_not_content(self) -> None:
+        original = fingerprint(self.reference)
+        with Image.open(self.folder / "copies" / "astronaut_copy.jpg") as copy:
+            self.assertTrue(same_picture(original, fingerprint(copy)))
+        self.assertFalse(same_picture(original, fingerprint(_rotated_view(self.reference))))
+        self.assertFalse(same_picture(original, fingerprint(self.reference.resize((512, 300)))))
+
+    def test_the_other_view_wins_and_copies_of_the_reference_are_skipped(self) -> None:
+        paths = list_images(self.folder, self.reference_path)
         for ranking in ("ransac", "matches"):
             with self.subTest(ranking=ranking):
-                lookup = find_closest_image(_astronaut(), paths, self.ORB, ranking)
-                self.assertEqual(lookup.ranked[0].path.name, "astronaut_2.jpg")
-                self.assertEqual(lookup.skipped, (("notes.png", "not a readable image"),))
+                lookup = find_closest_image(self.reference, paths, self.ORB, ranking)
+                self.assertEqual(self._names([lookup.ranked[0].path]), ["views/astronaut_2.jpg"])
+                skipped = {path.name: why for path, why in lookup.skipped}
+                self.assertEqual(
+                    skipped,
+                    {
+                        "astronaut_copy.jpg": "same picture as the reference",
+                        "notes.png": "not a readable image",
+                    },
+                )
                 self.assertEqual(len(lookup.ranked), 4)
 
+    def test_a_copy_of_the_unedited_original_is_skipped_after_editing(self) -> None:
+        edited = self.reference.crop((0, 0, 512, 380))  # no longer looks like the copy
+        paths = [self.folder / "copies" / "astronaut_copy.jpg", self.folder / "views" / "astronaut_2.jpg"]
+        lookup = find_closest_image(edited, paths, self.ORB, also_same_as=(self.reference,))
+        self.assertEqual([c.path.name for c in lookup.ranked], ["astronaut_2.jpg"])
+
+    def test_progress_reports_each_file_and_can_cancel(self) -> None:
+        paths = list_images(self.folder, self.reference_path)
+        seen: list[int] = []
+        find_closest_image(
+            self.reference, paths, self.ORB, progress=lambda done, _path: seen.append(done) or True
+        )
+        self.assertEqual(seen, list(range(len(paths))))
+        with self.assertRaises(SearchCancelled):
+            find_closest_image(self.reference, paths, self.ORB, progress=lambda done, _p: done < 2)
+
+    def test_stand_out_compares_the_best_score_with_the_median(self) -> None:
+        self.assertAlmostEqual(stand_out([90, 30, 20, 10]), 90 / 25)
+        self.assertIsNone(stand_out([90, 30]))  # too few images to judge
+        self.assertEqual(stand_out([3, 0, 0]), 3.0)  # a median of 0 counts as 1
+
+    def test_a_true_match_is_clear_and_a_folder_without_one_is_not(self) -> None:
+        paths = list_images(self.folder, self.reference_path)
+        found = find_closest_image(self.reference, paths, self.ORB)
+        self.assertTrue(found.clear)
+        unrelated = [self.folder / name for name in ("camera.png", "chelsea.png", "coffee.png")]
+        guess = find_closest_image(self.reference, unrelated, self.ORB)
+        self.assertFalse(guess.clear)
+
     def test_ransac_keeps_consistent_matches_and_rejects_too_few(self) -> None:
-        paths = [self.folder / "astronaut_2.jpg"]
-        best = find_closest_image(_astronaut(), paths, self.ORB).ranked[0]
+        paths = [self.folder / "views" / "astronaut_2.jpg"]
+        best = find_closest_image(self.reference, paths, self.ORB).ranked[0]
         self.assertGreater(best.consistent_count, 0.8 * best.match_count)
         few = np.array([[0, 0], [1, 1]])  # an affine transform needs 3 pairs
         keypoints = np.array([[1.0, 1.0], [5.0, 9.0]])
@@ -1514,31 +1585,47 @@ class ImageLookupTests(unittest.TestCase):
         self.assertEqual(to_work_size(Image.new("L", (300, 200))).size, (640, 427))
         self.assertEqual(to_work_size(Image.new("RGBA", (200, 400))).mode, "RGB")
 
-    def test_an_empty_or_unreadable_folder_is_reported(self) -> None:
-        with self.assertRaises(ValueError):
-            find_closest_image(_astronaut(), [], self.ORB)
-        with self.assertRaises(ValueError) as caught:
-            find_closest_image(_astronaut(), [self.folder / "notes.png"], self.ORB)
-        self.assertIn("could be compared", str(caught.exception))
-
-    def test_tool_shows_the_best_pair_and_the_ranking(self) -> None:
+    def test_tool_says_when_there_is_no_clear_match(self) -> None:
         document = ImageDocument()
-        document.load(self.folder / "astronaut_1.png")
+        document.load(self.reference_path)
+        unrelated = tuple(self.folder / name for name in ("camera.png", "chelsea.png", "coffee.png"))
+        tool = ImageLookupTool()
+        tool._ask_params = lambda _parent, _path: LookupRequest(
+            self.folder, unrelated, self.ORB, "matches"
+        )
+        result = tool.run(None, document)
+        self.assertTrue(result.message.startswith("No clear match. Best guess:"))
+        self.assertTrue(result.details["Confidence"].startswith("weak, may be wrong"))
+
+    def test_an_empty_or_unusable_folder_is_reported(self) -> None:
+        with self.assertRaises(ValueError):
+            find_closest_image(self.reference, [], self.ORB)
+        unusable = [self.folder / "notes.png", self.folder / "copies" / "astronaut_copy.jpg"]
+        with self.assertRaises(ValueError) as caught:
+            find_closest_image(self.reference, unusable, self.ORB)
+        self.assertIn("could be compared", str(caught.exception))
+        self.assertIn("same picture as the reference", str(caught.exception))
+
+    def test_tool_shows_the_best_pair_with_folder_relative_names(self) -> None:
+        document = ImageDocument()
+        document.load(self.reference_path)
         tool = ImageLookupTool()
         tool._ask_params = lambda _parent, _path: None
         self.assertIsNone(tool.run(None, document))
         paths = tuple(list_images(self.folder, document.path))
         tool._ask_params = lambda _parent, _path: LookupRequest(
-            self.folder, paths, self.ORB, "ransac"
+            self.folder, paths, self.ORB, "matches"
         )
         result = tool.run(None, document)
-        self.assertEqual(result.details["Best"], "astronaut_2.jpg")
-        self.assertTrue(result.details["Rank 1"].startswith("astronaut_2.jpg:"))
-        self.assertIn("notes.png", result.details["Skipped"])
-        self.assertTrue(result.message.startswith("Closest image: astronaut_2.jpg"))
+        self.assertEqual(result.details["Best"], "views/astronaut_2.jpg")
+        self.assertTrue(result.details["Rank 1"].startswith("views/astronaut_2.jpg:"))
+        self.assertIn(
+            "copies/astronaut_copy.jpg (same picture as the reference)", result.details["Skipped"]
+        )
+        self.assertTrue(result.message.startswith("Closest image: views/astronaut_2.jpg"))
+        self.assertTrue(result.details["Confidence"].startswith("clear"))
         document.apply(result.image, tool.tool_id)
         self.assertFalse(tool.is_available(document))
-
 
 if __name__ == "__main__":
     unittest.main()

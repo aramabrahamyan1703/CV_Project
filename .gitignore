@@ -41,3 +41,7 @@ data/**/*
 cv_project/lib/
 cv_project/bin/
 cv_project/include/
+
+# Downloaded model weights (see README: where they come from)
+models/*
+!models/.gitkeep
