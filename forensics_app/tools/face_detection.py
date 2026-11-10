@@ -229,6 +229,7 @@ def read_detection(chooser: FileChooser, variables: list[tk.StringVar]) -> tuple
 
 class FaceDetectionTool(ForensicsTool):
     tool_id = "face_detection"
+    produces_figure = True
     title = "Face detection (YuNet)"
     category = "Faces"
     description = "Find faces with OpenCV's YuNet: boxes, scores and five landmarks (Set 6.1)."
@@ -300,7 +301,19 @@ class FaceDetectionTool(ForensicsTool):
 # Webcam
 # --------------------------------------------------------------------------
 
-CAMERA_FIELDS = (IntField("Camera", 0, 9, "0 is the built-in camera", minimum=0),)
+CAMERA_FIELDS = (
+    IntField("Camera", 0, 9, "0 built-in; 1+ others, e.g. an iPhone", minimum=0),
+)
+# An iPhone (Continuity Camera) or USB camera can take seconds to send its
+# first picture, so the window waits this long before giving up; once frames
+# flow, a gap this long means the camera has stopped.
+STARTUP_SECONDS = 10.0
+GAP_SECONDS = 2.0
+IPHONE_HINT = (
+    "On a Mac, camera 0 is the built-in camera and 1 is usually an iPhone "
+    "(Continuity Camera): keep it nearby, signed in to the same Apple ID, with "
+    "Wi-Fi and Bluetooth on."
+)
 PREVIEW_MAX_W = 960
 FRAME_DELAY_MS = 15
 
@@ -325,12 +338,16 @@ class LiveDetectionWindow:
     delivering; keeping it a plain function lets tests feed still images.
     """
 
-    def __init__(self, parent: tk.Misc, detector: YuNetDetector, read_frame, title: str) -> None:
+    def __init__(
+        self, parent: tk.Misc, detector: YuNetDetector, read_frame, title: str, camera: int = 0
+    ) -> None:
         self._detector = detector
         self._read = read_frame
+        self._camera = camera
         self._latest: tuple[np.ndarray, list[Face]] | None = None
         self._times: list[float] = []
-        self._failures = 0
+        self._opened = time.perf_counter()
+        self._last_frame: float | None = None  # when the last frame arrived
         self.result: Capture | None = None
         self.error: str | None = None
 
@@ -339,7 +356,7 @@ class LiveDetectionWindow:
         self.top.transient(parent)
         frame = ttk.Frame(self.top, padding=12)
         frame.pack(fill="both", expand=True)
-        self._view = ttk.Label(frame, text="Starting the camera…", anchor="center")
+        self._view = ttk.Label(frame, text=f"Waiting for camera {camera} to start…", anchor="center")
         self._view.pack(fill="both", expand=True)
         bar = ttk.Frame(frame)
         bar.pack(fill="x", pady=(10, 0))
@@ -363,18 +380,28 @@ class LiveDetectionWindow:
 
     def _tick(self) -> None:
         frame = self._read()
+        now = time.perf_counter()
         if frame is None:
-            self._failures += 1
-            if self._failures > 30:  # about half a second without a frame
-                self.error = "The camera stopped sending frames."
+            if self._last_frame is None and now - self._opened > STARTUP_SECONDS:
+                self.error = (
+                    f"Camera {self._camera} opened but sent no picture within "
+                    f"{STARTUP_SECONDS:.0f} s.\n\n{IPHONE_HINT}"
+                )
                 self.close()
                 return
+            if self._last_frame is not None and now - self._last_frame > GAP_SECONDS:
+                self.error = f"Camera {self._camera} stopped sending pictures."
+                self.close()
+                return
+            if self._last_frame is None:
+                self._status.configure(
+                    text=f"Waiting for camera {self._camera}… {now - self._opened:.0f} s"
+                )
         else:
-            self._failures = 0
+            self._last_frame = now
             faces = self._detector.detect_bgr(frame)
             rgb = draw_faces(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), faces)
             self._latest = (rgb, faces)
-            now = time.perf_counter()
             self._times = [t for t in self._times if now - t < 1.0] + [now]
             shown = Image.fromarray(rgb)
             if shown.width > PREVIEW_MAX_W:
@@ -409,6 +436,7 @@ class LiveDetectionWindow:
 
 class WebcamFaceDetectionTool(ForensicsTool):
     tool_id = "face_detection_webcam"
+    produces_figure = True
     title = "Face detection (webcam)"
     category = "Faces"
     description = "Run YuNet live on a webcam stream; capture a frame as the image (Set 6.1)."
@@ -433,10 +461,11 @@ class WebcamFaceDetectionTool(ForensicsTool):
             messagebox.showinfo(
                 self.title,
                 f"Camera {params.camera} could not be opened.\n\n"
-                "On macOS, allow camera access for the app you started ForensicsApp "
-                "from (Terminal, iTerm, VS Code…) in System Settings → Privacy & "
-                "Security → Camera, then restart it. Also check that no other app "
-                "is using the camera.",
+                f"{IPHONE_HINT}\n\n"
+                "If camera 0 fails too, allow camera access for the app you started "
+                "ForensicsApp from (Terminal, iTerm, VS Code…) in System Settings → "
+                "Privacy & Security → Camera, then restart it. Also check that no "
+                "other app is using the camera.",
                 parent=parent,
             )
             return None
@@ -446,7 +475,7 @@ class WebcamFaceDetectionTool(ForensicsTool):
             return frame if ok else None
 
         try:
-            window = LiveDetectionWindow(parent, detector, read_frame, self.title)
+            window = LiveDetectionWindow(parent, detector, read_frame, self.title, params.camera)
             captured = window.run()
         finally:
             camera.release()

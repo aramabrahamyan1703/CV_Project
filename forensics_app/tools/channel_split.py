@@ -17,6 +17,7 @@ from .base import ForensicsTool, ToolResult
 
 class ChannelSplitTool(ForensicsTool):
     tool_id = "channel_split"
+    produces_figure = True
     title = "Channel split (RGB)"
     category = "Color"
     description = "Show the R, G and B channels side by side with labels."

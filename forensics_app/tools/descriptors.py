@@ -188,6 +188,7 @@ def render_keypoints(image: Image.Image, keypoints: np.ndarray) -> Image.Image:
 
 class DescriptorTool(ForensicsTool):
     tool_id = "descriptors"
+    produces_figure = True
     title = "Descriptors"
     category = "Features"
     description = "Extract ORB or SIFT descriptors and visualize keypoints (Set 5.2)."

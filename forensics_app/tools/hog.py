@@ -102,6 +102,7 @@ def extract_hog(
 
 class HOGTool(ForensicsTool):
     tool_id = "hog"
+    produces_figure = True
     title = "HOG features"
     category = "Features"
     description = "Extract a HOG descriptor and visualize its gradients (Set 4.3)."

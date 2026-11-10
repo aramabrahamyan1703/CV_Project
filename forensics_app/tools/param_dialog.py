@@ -374,9 +374,14 @@ class ProgressWindow:
         self.top.grab_set()  # the rest of the app waits, but stays drawn
         self.top.update()
 
-    def step(self, done: int, text: str) -> bool:
-        """Show ``done`` items finished and what is next; False once cancelled."""
+    def step(self, done: int, text: str, total: int | None = None) -> bool:
+        """Show ``done`` items finished and what is next; False once cancelled.
+
+        ``total`` changes the number of items, for loops that learn it late.
+        """
         if not self.cancelled:
+            if total is not None:
+                self._bar.configure(maximum=max(total, 1))
             self._bar.configure(value=done)
             self._status.configure(text=text)
             self.top.update()

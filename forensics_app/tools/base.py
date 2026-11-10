@@ -29,6 +29,12 @@ class ForensicsTool(ABC):
     category = "Other"
     description = ""
     requires_image = True
+    # A figure is a picture *about* an image (a plot, a sheet of panels, or a
+    # photo with boxes, circles or lines drawn on it), not a photo itself.
+    # While one is the working image, tools that analyse photos refuse it:
+    # face detection on a grid of eigenfaces would "find" the eigenfaces.
+    produces_figure = False
+    accepts_figures = False  # True only for tools that make sense on a figure
 
     
     def is_available(self, document: ImageDocument) -> bool:

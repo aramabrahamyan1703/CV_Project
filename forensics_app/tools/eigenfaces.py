@@ -221,10 +221,36 @@ def distances(model: EigenfaceModel, weights: np.ndarray, whiten: bool = True) -
     return np.linalg.norm(train - weights, axis=1)
 
 
+# A training face counts as the same picture as a query face when their pixels,
+# at the model's size, differ by at most this much on average (0..255). On LFW,
+# copies re-saved as JPEG (quality 95) or resized differ by at most 1.7; two
+# different photos by at least 6.2, and the closest test/training pair by 4.0.
+SAME_FACE_DIFFERENCE = 2.0
+
+
+def same_faces(model: EigenfaceModel, pixels: np.ndarray) -> np.ndarray:
+    """Indices of training faces showing exactly the face ``pixels`` (a model-size vector).
+
+    Recognising such a face would only find itself at distance 0, so the
+    recognition tools leave these out of its neighbours.
+    """
+    difference = np.abs(model.faces.astype(np.float64) - pixels).mean(axis=1)
+    return np.flatnonzero(difference <= SAME_FACE_DIFFERENCE)
+
+
 def nearest(
-    model: EigenfaceModel, weights: np.ndarray, count: int = 3, whiten: bool = True
+    model: EigenfaceModel,
+    weights: np.ndarray,
+    count: int = 3,
+    whiten: bool = True,
+    exclude: np.ndarray | list[int] = (),
 ) -> list[tuple[int, float]]:
-    """The ``count`` training faces closest to ``weights``: (index, distance), nearest first."""
+    """The ``count`` training faces closest to ``weights``: (index, distance), nearest first.
+
+    Training faces in ``exclude`` (e.g. the query face itself) are skipped.
+    """
     found = distances(model, weights, whiten)
-    order = np.argsort(found, kind="stable")[:count]
+    if len(exclude):
+        found[np.asarray(exclude, dtype=int)] = np.inf
+    order = [i for i in np.argsort(found, kind="stable") if np.isfinite(found[i])][:count]
     return [(int(index), float(found[index])) for index in order]

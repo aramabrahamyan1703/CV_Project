@@ -67,6 +67,7 @@ from forensics_app.tools.bow import (
     WORDS_PER_CLASS,
     BowClassifyTool,
     BowHistogramTool,
+    BuildCancelled,
     CodebookTool,
     build_codebook,
     classify_image,
@@ -74,7 +75,9 @@ from forensics_app.tools.bow import (
     get_model,
     histogram_for_image,
     list_class_folders,
+    nearest_words,
     render_visual_words,
+    split_class,
 )
 from forensics_app.tools.image_lookup import (
     ImageLookupTool,
@@ -1746,6 +1749,67 @@ class BowTests(unittest.TestCase):
         codebook_tool = CodebookTool()
         codebook_tool._ask_folder = lambda _parent: None
         self.assertIsNone(codebook_tool.run(None, document))
+
+    def test_split_is_seeded_disjoint_and_keeps_a_training_image(self) -> None:
+        paths = [Path(f"img{i:02d}.png") for i in range(10)]
+        train, test = split_class(paths, 0.3, 100, random_state=0)
+        self.assertEqual((len(train), len(test)), (7, 3))
+        self.assertFalse(set(train) & set(test))
+        self.assertEqual(split_class(paths, 0.3, 100, random_state=0), (train, test))
+        self.assertNotEqual(split_class(paths, 0.3, 100, random_state=1)[1], test)
+        self.assertEqual(split_class(paths[:1], 0.5, 100), ([paths[0]], []))
+        self.assertEqual(len(split_class(paths, 0.3, 4)[0]), 4)  # training capped
+
+    def test_nearest_words_matches_brute_force(self) -> None:
+        rng = np.random.default_rng(0)
+        descriptors, centroids = rng.normal(size=(50, 16)), rng.normal(size=(7, 16))
+        brute = np.argmin(
+            np.linalg.norm(descriptors[:, None, :] - centroids[None, :, :], axis=2), axis=1
+        )
+        np.testing.assert_array_equal(nearest_words(descriptors, centroids), brute)
+
+    def test_accuracy_is_measured_on_held_out_images(self) -> None:
+        model = build_codebook(self.root, detector=self.DETECTOR, max_per_class=4)
+        self.assertFalse(model.train_files & model.test_files)
+        self.assertEqual(len(model.test_files), 4)  # ceil(30% of 4) per class
+        tested = sum(total for _, total in model.test_results.values())
+        self.assertEqual(tested, len(model.test_files))
+        self.assertIsNotNone(model.test_accuracy)
+        self.assertEqual(model.classifier.steps[0][0], "hellinger")
+
+    def test_unreadable_images_are_skipped_not_fatal(self) -> None:
+        (self.root / "alpha" / "broken.png").write_text("not an image")
+        model = build_codebook(self.root, detector=self.DETECTOR, test_share=0.0)
+        self.assertIn(("broken.png", "not a readable image"), [(p.name, w) for p, w in model.skipped])
+
+    def test_build_can_be_cancelled(self) -> None:
+        with self.assertRaises(BuildCancelled):
+            build_codebook(self.root, detector=self.DETECTOR, progress=lambda done, *_: done < 2)
+
+    def test_classify_reports_the_true_class_and_flags_training_images(self) -> None:
+        model = build_codebook(self.root, detector=self.DETECTOR, max_per_class=4)
+        tool = BowClassifyTool()
+        held_out = sorted(model.test_files)[0]
+        document = ImageDocument()
+        document.load(held_out)
+        result = tool.run(None, document)
+        self.assertTrue(result.details["True class"].startswith(held_out.parent.name))
+        self.assertNotIn("Note", result.details)
+        trained = sorted(model.train_files)[0]
+        document.load(trained)
+        result = tool.run(None, document)
+        self.assertIn("used to train", result.details["Note"])
+        self.assertTrue(result.message.endswith("(a training image)"))
+
+    def test_tools_are_unavailable_on_bow_figures(self) -> None:
+        build_codebook(self.root, detector=self.DETECTOR, max_per_class=4)
+        registry = ToolRegistry([CodebookTool(), BowHistogramTool(), BowClassifyTool()])
+        document = ImageDocument()
+        document.current = self._textured(1, "alpha")
+        document.apply(Image.new("RGB", (40, 40)), "bow_codebook")
+        for tool in (BowHistogramTool(), BowClassifyTool()):
+            self.assertFalse(registry.is_available(tool, document))
+            self.assertIn("figure made by BoW codebook", registry.unavailable_message(tool, document))
 
 
 if __name__ == "__main__":

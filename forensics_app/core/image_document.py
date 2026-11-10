@@ -25,6 +25,9 @@ class ImageDocument:
         self.original: Image.Image | None = None
         self.current: Image.Image | None = None
         self.last_tool_id: str | None = None
+        # The tool that made the original: None for a loaded file, the tool's id
+        # when a tool started the document (Reset then returns to its result).
+        self._original_tool_id: str | None = None
         self._undo: list[tuple[Image.Image, str | None]] = []
         self._redo: list[tuple[Image.Image, str | None]] = []
 
@@ -69,6 +72,7 @@ class ImageDocument:
         self.original = loaded.copy()
         self.current = loaded
         self.last_tool_id = None
+        self._original_tool_id = None
         self._undo.clear()
         self._redo.clear()
 
@@ -84,6 +88,7 @@ class ImageDocument:
             self.original = image.copy()
             self.current = image.copy()
             self.last_tool_id = tool_id
+            self._original_tool_id = tool_id
             self._undo.clear()
             self._redo.clear()
             return
@@ -111,7 +116,7 @@ class ImageDocument:
             return False
         self._undo.append((self.current.copy(), self.last_tool_id))
         self.current = self.original.copy()
-        self.last_tool_id = None
+        self.last_tool_id = self._original_tool_id
         self._redo.clear()
         return True
 

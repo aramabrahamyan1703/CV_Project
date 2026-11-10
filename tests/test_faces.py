@@ -25,7 +25,9 @@ from forensics_app.tools.eigenfaces import (
     nearest,
     person_name,
     project,
+    same_faces,
     save_model,
+    to_face_vector,
 )
 
 HAVE_MODEL = fd.DEFAULT_MODEL.is_file()
@@ -252,6 +254,37 @@ class RecognitionToolTests(FaceFolderCase):
         self.assertEqual(result.details["True"], "Alan Turing (correct)")
         self.assertTrue(result.details["Closest 1"].startswith("Alan Turing"))
         self.assertEqual(result.message, "Predicted Alan Turing: correct.")
+
+    def test_a_training_face_is_not_matched_to_itself(self) -> None:
+        model = load_model(self._build())
+        document = ImageDocument()
+        document.load(self.train / "Alan_Turing" / "02.png")
+        tool = fr.FaceRecognitionTool()
+        # Plain distances: in this tiny synthetic set most eigenfaces are noise,
+        # which whitening would weigh as much as the real differences.
+        tool._ask_params = lambda _parent: (model, 8, False, 3)
+        result = tool.run(None, document)
+        self.assertNotIn("Alan_Turing/02.png", result.details["Closest 1"])
+        self.assertTrue(result.details["Closest 1"].startswith("Alan Turing"))  # another photo
+        self.assertIn("left out of its own matches", result.details["Training face"])
+        self.assertTrue(result.message.endswith("(a training face, compared without itself)"))
+
+    def test_a_copy_of_a_training_face_counts_as_the_same_face(self) -> None:
+        model = load_model(self._build())
+        # The same face saved elsewhere under another name and format. (Resized and
+        # JPEG copies were checked on LFW; these synthetic faces are pure noise.)
+        Image.open(self.train / "Ada_Lovelace" / "03.png").save(self.root / "renamed.bmp")
+        index = model.files.index("Ada_Lovelace/03.png")
+        found = same_faces(model, to_face_vector(Image.open(self.root / "renamed.bmp"), model.shape))
+        self.assertIn(index, list(found))
+        self.assertNotIn(index, [i for i, _ in nearest(model, model.coefficients[index], 5, exclude=found)])
+
+    def test_accuracy_on_the_training_folder_does_not_count_self_matches(self) -> None:
+        model = load_model(self._build())
+        tool = fr.RecognitionAccuracyTool()
+        tool._ask_params = lambda _parent: (model, 8, True, self.train)
+        result = tool.run(None, ImageDocument())
+        self.assertIn("18 of 18 test faces are training faces", result.details["Also in training"])
 
     def test_accuracy_over_a_test_folder(self) -> None:
         model = load_model(self._build())

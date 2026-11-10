@@ -123,6 +123,7 @@ def superimpose_matches(scene: Image.Image, matches: tuple[Match, ...]) -> Image
 
 class TemplateMatchingTool(ForensicsTool):
     tool_id = "template_matching"
+    produces_figure = True
     title = "Template matching"
     category = "Matching"
     description = (

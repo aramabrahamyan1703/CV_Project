@@ -37,6 +37,7 @@ from .eigenfaces import (
     nearest,
     person_name,
     project,
+    same_faces,
     save_model,
     to_face_vector,
 )
@@ -158,6 +159,7 @@ def eigenface_sheet(mean: np.ndarray, eigenfaces: list[np.ndarray], columns: int
 
 class EigenfaceBuilderTool(ForensicsTool):
     tool_id = "eigenface_builder"
+    produces_figure = True
     title = "Eigenface builder"
     category = "Faces"
     description = "PCA of a folder of faces: save the model and show the first eigenfaces (Set 6.2)."
@@ -323,6 +325,7 @@ class ModelSections:
 
 class FaceRecognitionTool(ForensicsTool):
     tool_id = "face_recognition"
+    produces_figure = True
     title = "Face recognition (eigenfaces)"
     category = "Faces"
     description = "Name the working face by its nearest training faces in eigenface space (Set 6.3)."
@@ -351,7 +354,15 @@ class FaceRecognitionTool(ForensicsTool):
         model, components, whiten, shown = request
 
         weights = project(model, source, components)
-        found = nearest(model, weights, shown, whiten)
+        # A training face (or a copy of one) would only find itself at d = 0.
+        itself = same_faces(model, to_face_vector(source, model.shape))
+        found = nearest(model, weights, shown, whiten, exclude=itself)
+        if not found:
+            messagebox.showinfo(
+                self.title, "Every training face is this same picture; nothing to compare with.",
+                parent=parent,
+            )
+            return None
         predicted = model.names[found[0][0]]
         truth = None
         if document.path is not None:
@@ -388,12 +399,19 @@ class FaceRecognitionTool(ForensicsTool):
                 f"The image ({source.width}×{source.height}) was squeezed to the model's "
                 f"{width}×{height}; recognition expects a face crop like the training faces."
             )
+        if len(itself):
+            details["Training face"] = (
+                f"this picture is in the training set ({model.files[int(itself[0])]}); "
+                "it was left out of its own matches"
+            )
         if truth is None:
             message = f"Predicted {predicted}."
         elif truth == predicted:
             message = f"Predicted {predicted}: correct."
         else:
             message = f"Predicted {predicted}, but this is {truth}."
+        if len(itself):
+            message += " (a training face, compared without itself)"
         return ToolResult(
             image=gallery(pictures, titles, columns=len(pictures), heading=heading),
             message=message,
@@ -423,6 +441,7 @@ class FaceRecognitionTool(ForensicsTool):
 
 class RecognitionAccuracyTool(ForensicsTool):
     tool_id = "recognition_accuracy"
+    produces_figure = True
     title = "Recognition accuracy (test folder)"
     category = "Faces"
     description = "Recognise every face in a test folder: accuracy and a predicted/true gallery (Set 6.3)."
@@ -445,9 +464,14 @@ class RecognitionAccuracyTool(ForensicsTool):
             return None
 
         weights = (test.pixels - model.mean) @ model.eigenfaces[:components].T
-        predicted = [
-            model.names[int(np.argmin(distances(model, w, whiten)))] for w in weights
-        ]
+        predicted = []
+        also_training = 0
+        for w, pixels in zip(weights, test.pixels):
+            # A test face that is also a training face would just find itself.
+            itself = same_faces(model, pixels)
+            also_training += bool(len(itself))
+            found = nearest(model, w, 1, whiten, exclude=itself)
+            predicted.append(model.names[found[0][0]] if found else "")
         truth = list(test.names)
         correct = [p == t for p, t in zip(predicted, truth)]
         accuracy = sum(correct) / len(correct)
@@ -476,6 +500,11 @@ class RecognitionAccuracyTool(ForensicsTool):
             "Accuracy": f"{accuracy:.1%} ({sum(correct)} of {len(correct)})",
             "Always guessing": f"{majority}: {majority_count / len(truth):.1%}",
         }
+        if also_training:
+            details["Also in training"] = (
+                f"{also_training} of {len(truth)} test faces are training faces; each was "
+                "compared without itself. Use a separate test folder for a fair accuracy."
+            )
         for name in sorted(set(truth)):
             hits = sum(c for c, t in zip(correct, truth) if t == name)
             total = truth.count(name)

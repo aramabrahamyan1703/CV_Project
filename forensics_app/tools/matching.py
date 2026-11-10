@@ -240,6 +240,7 @@ class MatchingRequest:
 
 class FeatureMatchingTool(ForensicsTool):
     tool_id = "feature_matching"
+    produces_figure = True
     title = "Feature matching"
     category = "Features"
     description = "Match ORB or SIFT keypoints with a second image (Set 5.3)."

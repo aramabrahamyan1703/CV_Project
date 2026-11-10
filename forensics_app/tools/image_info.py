@@ -10,6 +10,7 @@ from .base import ForensicsTool, ToolResult
 
 class ImageInfoTool(ForensicsTool):
     tool_id = "image_info"
+    accepts_figures = True  # inspecting a figure is harmless
     title = "Inspect image"
     category = "Starter tools"
     description = "Report basic properties without changing the image."

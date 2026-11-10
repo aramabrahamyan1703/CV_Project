@@ -343,6 +343,7 @@ class DetectionParams:
 
 class HOGPersonDetectionTool(ForensicsTool):
     tool_id = "hog_person_detection"
+    produces_figure = True
     title = "Person detection (HOG)"
     category = "Features"
     description = "Locate a person template by multi-scale HOG matching (Set 4.4)."

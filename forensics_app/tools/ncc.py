@@ -60,6 +60,7 @@ def compute_ncc(scene: Image.Image, template: Image.Image) -> np.ndarray:
 
 class NCCTool(ForensicsTool):
     tool_id = "ncc"
+    produces_figure = True
     title = "NCC image"
     category = "Matching"
     description = "Normalized cross-correlation response against a template (Set 4.1)."

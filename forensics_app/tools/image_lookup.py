@@ -306,6 +306,7 @@ class LookupRequest:
 
 class ImageLookupTool(ForensicsTool):
     tool_id = "image_lookup"
+    produces_figure = True
     title = "Closest image lookup"
     category = "Features"
     description = "Find the most similar image in a folder by keypoint matching (Set 5.4)."

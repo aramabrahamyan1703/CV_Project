@@ -84,6 +84,7 @@ def superimpose_edges(
 
 class EdgeVisualizationTool(ForensicsTool):
     tool_id = "edge_visualization"
+    produces_figure = True
     title = "Edge visualization"
     category = "Filtering"
     description = "Canny edges superimposed on the original image (Set 3.4)."

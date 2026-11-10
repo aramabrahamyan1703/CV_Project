@@ -237,25 +237,25 @@ class MainWindow:
 
     def _on_tool_click(self, tool: ForensicsTool) -> None:
         """Explain a greyed-out button, which never reaches :meth:`run_tool`."""
-        if tool.is_available(self.document):
+        if self.registry.is_available(tool, self.document):
             return  # the button's own command runs the tool
         self._report_unavailable(tool)
 
     def _describe_tool(self, tool: ForensicsTool) -> None:
-        if tool.is_available(self.document):
+        if self.registry.is_available(tool, self.document):
             self.status.set(tool.description)
         else:
-            self.status.set(tool.unavailable_message(self.document).partition("\n")[0])
+            self.status.set(self.registry.unavailable_message(tool, self.document).partition("\n")[0])
 
     def _report_unavailable(self, tool: ForensicsTool) -> None:
-        message = tool.unavailable_message(self.document)
+        message = self.registry.unavailable_message(tool, self.document)
         messagebox.showinfo(tool.title, message, parent=self.root)
         self._set_status(message.partition("\n")[0])
 
     def run_tool(self, tool: ForensicsTool) -> None:
         if tool.requires_image and not self._require_image():
             return
-        if not tool.is_available(self.document):
+        if not self.registry.is_available(tool, self.document):
             self._report_unavailable(tool)
             return
         try:
@@ -336,7 +336,7 @@ class MainWindow:
             button = self.tool_buttons.get(tool.tool_id)
             if button is not None:
                 button.configure(
-                    state="normal" if tool.is_available(self.document) else "disabled",
+                    state="normal" if self.registry.is_available(tool, self.document) else "disabled",
                     style="Current.Tool.TButton"
                     if tool.tool_id == self.document.last_tool_id
                     else "Tool.TButton",

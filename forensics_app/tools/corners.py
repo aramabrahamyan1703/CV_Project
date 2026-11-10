@@ -120,6 +120,7 @@ def render_corners(
 
 class CornerDetectionTool(ForensicsTool):
     tool_id = "corners"
+    produces_figure = True
     title = "Corner detection"
     category = "Features"
     description = (

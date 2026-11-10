@@ -32,6 +32,7 @@ def _figure_to_pil(figure: Figure) -> Image.Image:
 
 class HistogramTool(ForensicsTool):
     tool_id = "histogram"
+    produces_figure = True
     title = "Histogram visualization"
     category = "Intensity"
     description = "Plot the intensity histogram (R/G/B or grayscale)."
