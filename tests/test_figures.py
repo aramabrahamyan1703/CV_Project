@@ -20,6 +20,7 @@ FIGURE_TOOLS = {
     "hog_person_detection", "corners", "descriptors", "feature_matching", "image_lookup",
     "face_detection", "face_detection_webcam", "eigenface_builder", "face_recognition",
     "recognition_accuracy", "bow_codebook", "bow_histogram", "bow_classify",
+    "yolo_detection", "coco_to_yolo", "yolo_training", "yolo_ground_truth",
 }
 
 
