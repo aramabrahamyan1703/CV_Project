@@ -33,6 +33,9 @@ from .face_recognition import (
     RecognitionAccuracyTool,
 )
 from .bow import BowClassifyTool, BowHistogramTool, CodebookTool
+from .cnn_training import CnnTrainingTool
+from .cnn_classify import CnnClassifyTool
+from .cnn_features import CnnFeatureExtractionTool, FeatureProjectionTool
 from .yolo_detection import YoloDetectionTool, YoloGroundTruthTool
 from .yolo_training import CocoToYoloTool, YoloTrainingTool
 
@@ -71,6 +74,10 @@ def build_tool_registry() -> ToolRegistry:
             CodebookTool(),
             BowHistogramTool(),
             BowClassifyTool(),
+            CnnTrainingTool(),
+            CnnClassifyTool(),
+            CnnFeatureExtractionTool(),
+            FeatureProjectionTool(),
             YoloDetectionTool(),
             CocoToYoloTool(),
             YoloTrainingTool(),

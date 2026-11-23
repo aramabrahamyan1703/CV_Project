@@ -6,5 +6,7 @@ scikit-image>=0.22
 opencv-python>=4.8
 # BoW codebook (Set 7) and scripts/export_lfw.py (LFW download).
 scikit-learn>=1.3
-# YOLO object detection and training (Set 9); pulls in PyTorch (~500 MB).
+# YOLO (Set 9) and the CNN tools (Set 8); pulls in PyTorch and torchvision (~500 MB).
 ultralytics>=8.3
+# t-SNE / UMAP feature projection (Set 8.3); pulls in numba.
+umap-learn>=0.5

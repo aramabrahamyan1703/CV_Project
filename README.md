@@ -64,6 +64,48 @@ always answering the most common person scores 45%).
 from (Terminal, iTerm, VS Code…) in System Settings → Privacy & Security →
 Camera, then restart that app.
 
+## Classification tools (Set 8): CNNs on CIFAR-10
+
+The four **Classification** tools use PyTorch and torchvision (installed with
+Ultralytics, see `requirements.txt`) and, for UMAP, `umap-learn`. They follow
+the course notebook `image_classification_using_cnn.ipynb`, in PyTorch and run
+locally (Apple MPS or CUDA when available) instead of Keras in Colab.
+
+1. **CNN training** (8.1) trains the notebook's small CNN (two 3×3 conv
+   layers, 128-unit dense layer) or InceptionV3 by transfer learning
+   (ImageNet weights, new 1024 → 10 head; optionally fine-tunes all layers
+   afterwards). Validation is the last 10% of the training set, as Keras'
+   `validation_split=0.1`; the test set is used once, after training. It saves
+   `model.pt` (weights) and `passport.json` to `data/cifar10/models/<model>/`.
+   The passport records the dataset and sample sizes, the class names, the
+   preprocessing, every training setting and the per-epoch history.
+2. **CNN classification** (8.2) loads a `model.pt`, shows its passport and
+   training curves, and classifies the current image after the passport's
+   preprocessing (squashed to 32×32 RGB like CIFAR-10, then the network's own
+   resizing and scaling).
+3. **CNN feature extraction** (8.3) runs the 10,000 test images through a
+   model and saves the vectors with their labels to
+   `data/cifar10/features/<model>[_head]_test.npz`: the small CNN's 128-unit
+   layer, or InceptionV3's trained 1024-unit head layer (default) or its
+   2048-d ImageNet backbone.
+4. **Feature projection (t-SNE, UMAP)** (8.3) loads such a file, reduces it to
+   50 dimensions with PCA and plots t-SNE and UMAP side by side, coloured by
+   class, with each layout's 5-nearest-neighbour accuracy.
+
+CIFAR-10 (170 MB) is downloaded into `data/cifar10/` (ignored by git) the first
+time, InceptionV3's ImageNet weights (100 MB) into torch's cache. Measured on an
+Apple M3 Pro, seed 0, default settings (10 epochs, all 45,000 training images):
+
+| Model | Training time | Validation | Test (10,000) |
+|---|---:|---:|---:|
+| Small CNN | 0.8 min | 66.1% | 65.0% |
+| InceptionV3, head only | 5.8 min | 86.2% | 86.1% |
+
+Both overfit (training accuracy about 95%); InceptionV3's validation loss is
+lowest around epoch 4. Projecting 5,000 test vectors takes about 15–25 s; the
+5-NN accuracy in 2-D was 81% (t-SNE and UMAP) for InceptionV3's head layer,
+73–75% for its backbone and 47–53% for the small CNN.
+
 ## Detection tools (Set 9): YOLO with Ultralytics
 
 The four **Detection** tools need Ultralytics, which installs PyTorch (about
