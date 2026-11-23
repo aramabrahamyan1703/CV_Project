@@ -33,6 +33,8 @@ from .face_recognition import (
     RecognitionAccuracyTool,
 )
 from .bow import BowClassifyTool, BowHistogramTool, CodebookTool
+from .yolo_detection import YoloDetectionTool, YoloGroundTruthTool
+from .yolo_training import CocoToYoloTool, YoloTrainingTool
 
 
 def build_tool_registry() -> ToolRegistry:
@@ -69,6 +71,10 @@ def build_tool_registry() -> ToolRegistry:
             CodebookTool(),
             BowHistogramTool(),
             BowClassifyTool(),
+            YoloDetectionTool(),
+            CocoToYoloTool(),
+            YoloTrainingTool(),
+            YoloGroundTruthTool(),
         ]
     )
 

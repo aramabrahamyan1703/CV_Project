@@ -387,6 +387,16 @@ class ProgressWindow:
             self.top.update()
         return not self.cancelled
 
+    def note(self, text: str) -> None:
+        """Show ``text`` and keep the window drawn, even after Cancel.
+
+        For work that finishes in the background once cancelled (e.g. a
+        training run that still validates and saves its weights).
+        """
+        if self.top.winfo_exists():
+            self._status.configure(text=text)
+            self.top.update()
+
     def close(self) -> None:
         if self.top.winfo_exists():
             self.top.grab_release()
